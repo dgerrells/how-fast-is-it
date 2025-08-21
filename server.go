@@ -273,8 +273,8 @@ func main() {
 	// 	log.Println(http.ListenAndServe("localhost:6061", nil))
 	// }()
 
-	log.Println("Server started on :42069")
-	if err := http.ListenAndServe(":42069", nil); err != nil {
+	log.Println("Server started on :41069")
+	if err := http.ListenAndServe(":41069", nil); err != nil {
 		log.Fatal("ListenAndServe:", err)
 	}
 
