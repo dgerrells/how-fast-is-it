@@ -178,7 +178,7 @@
         document.addEventListener('touchstart', (e) => {
             e.preventDefault();
             touchDown = true;
-            const rect = document.getBoundingClientRect();
+            const rect = canvas.getBoundingClientRect();
             const touch = e.touches[0];
             const x = touch.clientX - rect.left;
             const y = touch.clientY - rect.top;
@@ -192,7 +192,7 @@
         document.addEventListener('touchmove', (e) => {
             e.preventDefault();
             if (touchDown) {
-                const rect = document.getBoundingClientRect();
+                const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
                 const x = touch.clientX - rect.left;
                 const y = touch.clientY - rect.top;
