@@ -66,7 +66,7 @@ const numBuffers = 3
 const maxClients = 100
 const particleCount = 1000000
 
-var numThreads = runtime.NumCPU() - 1
+var numThreads = int(math.Max(float64(runtime.NumCPU()-1), 1))
 var particlesPerThread = particleCount / numThreads
 
 const friction = 0.99
