@@ -194,6 +194,7 @@
 
         // Touch Events
         document.addEventListener('touchstart', (e) => {
+            event.preventDefault();
             if (e.touches.length === 1) {
                 touchDown = true;
                 const rect = canvas.getBoundingClientRect();
@@ -207,6 +208,8 @@
                 lastTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                 lastTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
             }
+        }, {
+            passive: false
         });
 
         document.addEventListener('touchend', (e) => {
@@ -216,6 +219,7 @@
         });
 
         document.addEventListener('touchmove', (e) => {
+            event.preventDefault();
             if (e.touches.length === 1 && touchDown) {
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
@@ -231,6 +235,8 @@
                 lastTouchY = currentTouchY;
                 sendInput(0, 0, false, dx, dy); 
             }
+        }, {
+            passive: false
         });
 
         function setupWebGL() {

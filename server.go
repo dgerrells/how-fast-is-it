@@ -84,8 +84,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  5000,
-		height: 5000,
+		width:  2000,
+		height: 2000,
 	}
 )
 
@@ -278,8 +278,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 const (
-	OpCodeFullFrame  byte = 0x01
-	OpCodeDeltaFrame byte = 0x02
+	OpCodeFrame   byte = 0x01
+	OpCodeSimSize byte = 0x02
 )
 
 func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
