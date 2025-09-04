@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
-	"compress/zlib"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"math"
 	"math/rand"
@@ -36,9 +36,15 @@ type Input struct {
 	IsTouchDown bool
 }
 
+type ClientCam struct {
+	X      float32
+	Y      float32
+	Width  int32
+	Height int32
+}
+
 type Frame struct {
-	FullBuffer []byte
-	Delta      []byte
+	data []byte
 }
 
 type SimJob struct {
@@ -57,16 +63,14 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-var clientFullFrameRequestFlags [maxClients]bool
-
 // var clientSendChannels [maxClients]chan []byte
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const numBuffers = 3
 const maxClients = 100
-const particleCount = 1000000
+const particleCount = 3000000
 
-var numThreads = int(math.Max(float64(runtime.NumCPU()-1), 1))
+var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 4))
 var particlesPerThread = particleCount / numThreads
 
 const friction = 0.99
@@ -76,21 +80,20 @@ var (
 	clientsMu  sync.Mutex
 	frameCount uint64
 	inputs     [maxClients]Input
+	cameras    [maxClients]ClientCam
 	particles  = []Particle{}
+	simState   = SimState{
+		dt:     1.0 / 60.0,
+		width:  5000,
+		height: 5000,
+	}
 )
 
 func startSim() {
-	simState := SimState{
-		dt:     1.0 / 60.0,
-		width:  720,
-		height: 480,
-	}
-
 	framePool := sync.Pool{
 		New: func() interface{} {
 			return &Frame{
-				FullBuffer: make([]byte, simState.width*simState.height),
-				Delta:      make([]byte, simState.width*simState.height),
+				data: make([]byte, int(simState.width*simState.height)/8),
 			}
 		},
 	}
@@ -110,8 +113,6 @@ func startSim() {
 	ticker := time.NewTicker(time.Second / 60)
 	defer ticker.Stop()
 	lastTime := time.Now()
-
-	lastFrameBuffer := make([]byte, simState.width*simState.height)
 
 	// wait group
 	jobs := make(chan SimJob, numThreads)
@@ -155,7 +156,7 @@ func startSim() {
 		}
 
 		frame := framePool.Get().(*Frame)
-		framebuffer := frame.FullBuffer
+		framebuffer := frame.data
 		for i := range framebuffer {
 			framebuffer[i] = 0
 		}
@@ -165,29 +166,24 @@ func startSim() {
 			y := int(p.y)
 			if x >= 0 && x < int(simState.width) && y >= 0 && y < int(simState.height) {
 				idx := (y*int(simState.width) + x)
-				if idx < len(framebuffer) {
-					sum := int16(framebuffer[idx]) + 1
-					if sum > math.MaxUint8 {
-						sum = 255
+				if idx < int(simState.width*simState.height) {
+					byteIndex := idx / 8
+					bitOffset := idx % 8
+					if byteIndex < len(framebuffer) {
+						framebuffer[byteIndex] |= (1 << bitOffset)
 					}
-					framebuffer[idx] = byte(sum)
 				}
 			}
 		}
 
-		deltaBytes := CreateDeltaBuffer(lastFrameBuffer, framebuffer)
-		rleBytes := RLEncode(deltaBytes)
-		copy(lastFrameBuffer, framebuffer)
-
 		go func(data []byte) {
-			var compressedBuffer bytes.Buffer
-			zlibWriter := zlib.NewWriter(&compressedBuffer)
-			if _, err := zlibWriter.Write(data); err != nil {
-				log.Println("zlib write failed:", err)
-				return
-			}
-			zlibWriter.Close()
-			frame.Delta = compressedBuffer.Bytes()
+			// var compressedBuffer bytes.Buffer
+			// zlibWriter := zlib.NewWriter(&compressedBuffer)
+			// if _, err := zlibWriter.Write(data); err != nil {
+			// 	log.Println("zlib write failed:", err)
+			// 	return
+			// }
+			// zlibWriter.Close()
 			// frame.Delta = data
 			select {
 			case framesChannel <- frame:
@@ -195,7 +191,7 @@ func startSim() {
 				log.Print("too slow")
 				framePool.Put(frame)
 			}
-		}(rleBytes)
+		}(frame.data)
 	}
 }
 
@@ -214,8 +210,6 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clients = append(clients, conn)
-	idx := len(clients) - 1
-	clientFullFrameRequestFlags[idx] = true
 	clientSendChannelMap[conn] = make(chan []byte)
 
 	clientsMu.Unlock()
@@ -230,6 +224,9 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			if c == conn {
 				clients = append(clients[:i], clients[i+1:]...)
 				inputs[i] = Input{}
+				cameras[i] = ClientCam{}
+				cameras[i].Width = 1
+				cameras[i].Height = 1
 				break
 			}
 		}
@@ -247,37 +244,37 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if mt == websocket.BinaryMessage {
+			reader := bytes.NewReader(message)
 			var input Input
-			err := binary.Read(bytes.NewReader(message), binary.LittleEndian, &input)
-			if err != nil {
-				log.Println("Binary read failed:", err)
+			// interpret x and y as offsets.
+			var cam ClientCam
+			// read input
+			errInput := binary.Read(reader, binary.LittleEndian, &input)
+			if errInput != nil {
+				log.Println("Binary read failed input:", errInput)
+				continue
+			}
+			// read cam input
+			errCam := binary.Read(reader, binary.LittleEndian, &cam)
+			if errCam != nil {
+				log.Println("Binary read failed cam:", errCam)
 				continue
 			}
 
-			// maybe later we lock or figure out way to not need a lock in a hot path
+			// maybe later we lock or figure out way to not need as lock in a hot path
 			// this is fine as only chance of bad data is if someone connect or drops whilst updating input
 			idx := findClientIndex(conn)
 			if idx != -1 && idx < maxClients {
+				cameras[idx].Width = cam.Width
+				cameras[idx].Height = cam.Height
+				cameras[idx].X += cam.X
+				cameras[idx].Y += cam.Y
 				inputs[idx] = input
+				inputs[idx].X += cameras[idx].X
+				inputs[idx].Y += cameras[idx].Y
 			}
 		}
 	}
-}
-
-func main() {
-	go startSim()
-	http.HandleFunc("/ws", wsHandler)
-	http.Handle("/", http.FileServer(http.Dir("./public")))
-
-	// go func() {
-	// 	log.Println(http.ListenAndServe("localhost:6061", nil))
-	// }()
-
-	log.Println("Server started on :41069")
-	if err := http.ListenAndServe(":41069", nil); err != nil {
-		log.Fatal("ListenAndServe:", err)
-	}
-
 }
 
 const (
@@ -285,38 +282,60 @@ const (
 	OpCodeDeltaFrame byte = 0x02
 )
 
-var fullFrameBuffer bytes.Buffer
-var deltaFrameBuffer bytes.Buffer
-
 func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 	for {
 		frame := <-ch
-		fullFrameBuffer.Reset()
-		fullFrameBuffer.WriteByte(OpCodeFullFrame)
-		fullFrameBuffer.Write(frame.FullBuffer)
-		fullFrameBytes := fullFrameBuffer.Bytes()
-
-		deltaFrameBuffer.Reset()
-		deltaFrameBuffer.WriteByte(OpCodeDeltaFrame)
-		deltaFrameBuffer.Write(frame.Delta)
-		deltaFrameBytes := deltaFrameBuffer.Bytes()
+		frameBuffer := frame.data
 
 		clientsMu.Lock()
 		for i, conn := range clients {
+			cam := &cameras[i]
+			x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
 
-			var dataToSend []byte
-			if clientFullFrameRequestFlags[i] {
-				dataToSend = fullFrameBytes
-				clientFullFrameRequestFlags[i] = false
-			} else {
-				dataToSend = deltaFrameBytes
+			maxCamX := int32(simState.width) - width
+			if x < 0 {
+				x = 0
+				cam.X = 0
+			} else if x > maxCamX {
+				x = maxCamX
+				cam.X = float32(maxCamX)
+			}
+
+			maxCamY := int32(simState.height) - height
+			if y < 0 {
+				y = 0
+				cam.Y = 0
+			} else if y > maxCamY {
+				y = maxCamY
+				cam.Y = float32(maxCamY)
+			}
+
+			if x+width > int32(simState.width) {
+				width = int32(simState.width) - x
+			}
+			if y+height > int32(simState.height) {
+				height = int32(simState.height) - y
+			}
+			dataToSend := make([]byte, (width*height+7)/8)
+
+			for row := int32(0); row < height; row++ {
+				for col := int32(0); col < width; col++ {
+					mainFrameIndex := ((y+row)*int32(simState.width) + (x + col))
+					dataToSendIndex := (row*width + col)
+
+					if mainFrameIndex/8 < int32(len(frameBuffer)) && dataToSendIndex/8 < int32(len(dataToSend)) {
+						isSet := (frameBuffer[mainFrameIndex/8] >> (mainFrameIndex % 8)) & 1
+						if isSet == 1 {
+							dataToSend[dataToSendIndex/8] |= (1 << (dataToSendIndex % 8))
+						}
+					}
+				}
 			}
 
 			select {
 			case clientSendChannelMap[conn] <- dataToSend:
 			default:
-				log.Printf("Client %d's channel is full, dropping frame. Requesting full frame.", i)
-				clientFullFrameRequestFlags[i] = true
+				log.Printf("Client %d's channel is full, dropping frame.", i)
 			}
 		}
 		clientsMu.Unlock()
@@ -357,7 +376,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 					dirx := input.X - particles[p].x
 					diry := input.Y - particles[p].y
 					dist := dirx*dirx + diry*diry
-					if dist < 10000 && dist > 1 {
+					if dist < 100000 && dist > 1 {
 						var grav = 4 / float32(math.Sqrt(float64(dist)))
 						particles[p].dx += dirx * job.simState.dt * grav * 3
 						particles[p].dy += diry * job.simState.dt * grav * 3
@@ -383,54 +402,19 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 	}
 }
 
-func CreateDeltaBuffer(oldBuffer, newBuffer []byte) []byte {
-	if len(oldBuffer) != len(newBuffer) {
-		return newBuffer
-	}
-	deltaBuffer := make([]byte, len(newBuffer))
+func main() {
+	go startSim()
+	http.HandleFunc("/ws", wsHandler)
+	http.Handle("/", http.FileServer(http.Dir("./public")))
 
-	for i := 0; i < len(newBuffer); i++ {
-		diff := int16(newBuffer[i]) - int16(oldBuffer[i])
-		deltaBuffer[i] = zigZagEncode(int8(diff))
-	}
+	// go func() {
+	// 	log.Println(http.ListenAndServe("localhost:6061", nil))
+	// }()
 
-	return deltaBuffer
-}
-
-func zigZagEncode(n int8) byte {
-	if n >= 0 {
-		return byte(n * 2)
-	}
-	return byte(-n*2 - 1)
-}
-
-func RLEncode(data []byte) []byte {
-	var encoded []byte
-	if len(data) == 0 {
-		return encoded
+	var port = 41069
+	log.Println(fmt.Sprintf("Server started on :%d", port))
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
+		log.Fatal("ListenAndServe:", err)
 	}
 
-	const sentinel byte = 255
-
-	i := 0
-	for i < len(data) {
-		currentByte := data[i]
-		count := 1
-		j := i + 1
-		for j < len(data) && data[j] == currentByte && count < 254 {
-			count++
-			j++
-		}
-
-		if count > 1 || currentByte == sentinel {
-			encoded = append(encoded, sentinel)
-			encoded = append(encoded, byte(count))
-			encoded = append(encoded, currentByte)
-		} else {
-			encoded = append(encoded, currentByte)
-		}
-		i = j
-	}
-
-	return encoded
 }

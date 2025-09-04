@@ -37,101 +37,89 @@
     <script>
         const OP_CODE_FULL_FRAME = 0x01;
         const OP_CODE_DELTA_FRAME = 0x02;
-        const width = 720;
-        const height = 480;
+
         const canvas = document.getElementById('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        canvas.style.width = `${width}px`;
-        canvas.style.height = `${height}px`;
-        const ctx = canvas.getContext('2d');
         const host = window.location.host
         const ws = new WebSocket(`ws://${host}/ws`);
 
-        let imageData = ctx.createImageData(canvas.width, canvas.height);
-        let pixelBuff = new Uint8Array(width*height);
-        let deltaBuff = new Uint8Array(width*height);
+        let gl, program, texture, quadBuffer;
+        let camera = {
+            x: 0,
+            y: 0,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        };
+        let pixelBuff = new Uint8Array(camera.width * camera.height);
         let touchDown = false;
+        let isPanning = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        let lastTouchX = 0;
+        let lastTouchY = 0;
 
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = function(event) {
             console.log("WebSocket connection opened.");
+            setupWebGL();
+            resizeCanvas();
         };
 
         ws.onmessage = function(event) {
-            const receivedBuffer = new Uint8Array(event.data);
-            const opCode = receivedBuffer[0];
-            const data = receivedBuffer.slice(1);
-
-            if (opCode === OP_CODE_FULL_FRAME) {
-                applyFullFrame(data);
-            } else if (opCode === OP_CODE_DELTA_FRAME) {
-                const depressed = pako.inflate(data);
-                rleDecode(depressed, 255, deltaBuff);
-                applyDelta(deltaBuff);
-            }
+            const buff = new Uint8Array(event.data);
+            unpackBits(buff);
+            renderFrame(pixelBuff)
         };
 
-        function renderFrame(data) {
-            const numPixels = data.length;
-            const max = 100;
-            const scale = 55 + 255/max;
-            for (let i = 0; i < numPixels; i++) {
-                const x = i % width;
-                const y = Math.floor(i / width);
-                const count = Math.min(max,data[i]);
-                imageData.data[i * 4] = Math.min(255, count * scale * x / width);
-                imageData.data[i * 4 + 1] = Math.min(255, count * scale * y / height);
-                imageData.data[i * 4 + 2] = Math.min(255, count * scale * (1 - y / height));
-                imageData.data[i * 4 + 3] = 255;
-            }
-            ctx.putImageData(imageData, 0, 0);
+        function resizeCanvas() {
+            camera.width = window.innerWidth;
+            camera.height = window.innerHeight;
+            canvas.width = camera.width;
+            canvas.height = camera.height;
+            canvas.style.width = `${camera.width}px`;
+            canvas.style.height = `${camera.height}px`;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            pixelBuff = new Uint8Array(camera.width * camera.height);
+            // Request a full frame with the new dimensions
+            sendInput(0, 0, false);
         }
 
-        function applyFullFrame(data) {
-            const numPixels = data.length;
-            for (let i = 0; i < numPixels; i++) {
-                pixelBuff[i] = data[i];
+        window.addEventListener('resize', resizeCanvas);
+
+        const byteToPixels = new Uint8Array(256 * 8);
+        for (let i = 0; i < 256; i++) {
+            for (let bit = 0; bit < 8; bit++) {
+                const pixelValue = ((i >> bit) & 1) ? 255 : 0;
+                byteToPixels[i * 8 + bit] = pixelValue;
             }
-            renderFrame(pixelBuff)
         }
 
-        function applyDelta(delta) {
-            const numPixels = delta.length;
-            for (let i = 0; i < numPixels; i++) {
-                pixelBuff[i] = pixelBuff[i] + delta[i];
-            }
-            renderFrame(pixelBuff)
-        }
-
-        function rleDecode(encodedData, sentinel, output) {
-            // const decodedData = [];
-            let q = 0;
-            let i = 0;
-
-            while (i < encodedData.length) {
-                const currentByte = encodedData[i];
-
-                if (currentByte === sentinel) {
-                    const count = encodedData[i + 1];
-                    const value = encodedData[i + 2];
-                    
-                    for (let k = 0; k < count; k++) {
-                        output[q++] = zigZagDecode(value);
-                        // decodedData.push(value);
-                    }
-                    i += 3;
-                } else {
-                    output[q++] = zigZagDecode(currentByte);
-                    // decodedData.push(currentByte);
-                    i += 1;
+        function unpackBits(data) {
+            const totalPixels = camera.width * camera.height;
+            let pixelIndex = 0;
+            for (let i = 0; i < data.length; i++) {
+                const byte = data[i];
+                const sourceIndex = byte * 8;
+                for (let j = 0; j < 8; j++) {
+                    if (pixelIndex >= totalPixels) {
+                        return;
+                     }
+                    pixelBuff[pixelIndex++] = byteToPixels[sourceIndex + j];
                 }
             }
         }
 
-        function zigZagDecode(n) {
-            return n % 2 === 0 ? n / 2: -(n + 1) / 2
+        function renderFrame(data) {
+            if (!gl) return;
+
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, camera.width, camera.height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
 
         ws.onclose = function(event) {
@@ -142,27 +130,47 @@
             console.error("WebSocket error:", error);
         };
 
-        // Function to send input data to the server
-        function sendInput(x, y, isTouchDown) {
-            const buffer = new ArrayBuffer(12); // 2 float32 (8 bytes) + 1 bool (4 bytes)
+        console.log(camera);
+
+        function sendInput(x, y, isTouchDown, camDx = 0, camDy = 0) {
+            // Buffer size is now 12 (input) + 16 (camera) = 28 bytes
+            const buffer = new ArrayBuffer(28); 
             const view = new DataView(buffer);
-            view.setFloat32(0, x, true); // Little-endian
-            view.setFloat32(4, y, true); // Little-endian
-            view.setInt32(8, isTouchDown ? 1 : 0, true); // Use int32 for the boolean
+            
+            // Input data
+            view.setFloat32(0, x, true); 
+            view.setFloat32(4, y, true); 
+            view.setUint8(8, isTouchDown ? 1 : 0, true);
+
+            // Camera data
+            view.setFloat32(9, -camDx, true);
+            view.setFloat32(13, camDy, true);
+            view.setInt32(17, camera.width, true);
+            view.setInt32(21, camera.height, true);
+
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(buffer);
             }
         }
 
         document.addEventListener('mousedown', (e) => {
-            touchDown = true;
-            const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
-            sendInput(x, y, touchDown);
+            if (e.button === 0) {
+                touchDown = true;
+                const rect = canvas.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = camera.height - (e.clientY - rect.top);
+                sendInput(x, y, touchDown);
+            } else if (e.button === 2) {
+                touchDown = false;
+                isPanning = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                e.preventDefault(); 
+            }
         });
 
-        document.addEventListener('mouseup', () => {
+        document.addEventListener('mouseup', (e) => {
+            isPanning = false;
             touchDown = false;
             sendInput(0, 0, touchDown);
         });
@@ -171,34 +179,153 @@
             if (touchDown) {
                 const rect = canvas.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const y = e.clientY - rect.top;
+                const y = camera.height - (e.clientY - rect.top);
                 sendInput(x, y, touchDown);
+            } else if (isPanning) {
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                sendInput(0, 0, false, dx, dy); 
             }
         });
+
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // Touch Events
         document.addEventListener('touchstart', (e) => {
-            e.preventDefault();
-            touchDown = true;
-            const rect = canvas.getBoundingClientRect();
-            const touch = e.touches[0];
-            const x = touch.clientX - rect.left;
-            const y = touch.clientY - rect.top;
-            sendInput(x, y, touchDown);
-        });
-        document.addEventListener('touchend', (e) => {
-            e.preventDefault();
-            touchDown = false;
-            sendInput(0, 0, touchDown);
-        });
-        document.addEventListener('touchmove', (e) => {
-            e.preventDefault();
-            if (touchDown) {
+            if (e.touches.length === 1) {
+                touchDown = true;
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
                 const x = touch.clientX - rect.left;
-                const y = touch.clientY - rect.top;
+                const y = camera.height - (touch.clientY - rect.top);
                 sendInput(x, y, touchDown);
+            } else if (e.touches.length === 2) {
+                touchDown = false;
+                isPanning = true;
+                lastTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                lastTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
             }
         });
+
+        document.addEventListener('touchend', (e) => {
+            touchDown = false;
+            isPanning = false;
+            sendInput(0, 0, touchDown);
+        });
+
+        document.addEventListener('touchmove', (e) => {
+            if (e.touches.length === 1 && touchDown) {
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                const x = touch.clientX - rect.left;
+                const y = camera.height - (touch.clientY - rect.top);
+                sendInput(x, y, touchDown);
+            } else if (e.touches.length === 2) {
+                const currentTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const currentTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const dx = currentTouchX - lastTouchX;
+                const dy = currentTouchY - lastTouchY;
+                lastTouchX = currentTouchX;
+                lastTouchY = currentTouchY;
+                sendInput(0, 0, false, dx, dy); 
+            }
+        });
+
+        function setupWebGL() {
+            gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
+            if (!gl) {
+                console.error("WebGL not supported, falling back to 2D canvas.");
+                return;
+            }
+
+            const vsSource = `
+                attribute vec2 a_position;
+                attribute vec2 a_texCoord;
+                varying vec2 v_texCoord;
+                void main() {
+                    gl_Position = vec4(a_position, 0.0, 1.0);
+                    v_texCoord = a_texCoord;
+                }
+            `;
+
+            const fsSource = `
+                precision mediump float;
+                varying vec2 v_texCoord;
+                uniform sampler2D u_image;
+
+                void main() {
+                    float x = v_texCoord.x;
+                    float y = v_texCoord.y;
+                    
+                    vec3 color = vec3(x, y, 1.0 - y);
+                    float mask = texture2D(u_image, v_texCoord).r;
+                    
+                    gl_FragColor = vec4(color * mask, 1.0);
+                }
+            `;
+            
+            function createShader(gl, type, source) {
+                const shader = gl.createShader(type);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                    console.error('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
+                    gl.deleteShader(shader);
+                    return null;
+                }
+                return shader;
+            }
+
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+            program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(program));
+                return;
+            }
+
+            gl.useProgram(program);
+
+            quadBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+            const vertices = new Float32Array([
+                -1, -1, 0, 0,  // bottom-left
+                 1, -1, 1, 0,  // bottom-right
+                 1,  1, 1, 1,  // top-right
+                -1, -1, 0, 0,  // bottom-left
+                 1,  1, 1, 1,  // top-right
+                -1,  1, 0, 1   // top-left
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+            const positionLocation = gl.getAttribLocation(program, 'a_position');
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 4 * Float32Array.BYTES_PER_ELEMENT, 0);
+            gl.enableVertexAttribArray(positionLocation);
+
+            const texCoordLocation = gl.getAttribLocation(program, 'a_texCoord');
+            gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 4 * Float32Array.BYTES_PER_ELEMENT, 2 * Float32Array.BYTES_PER_ELEMENT);
+            gl.enableVertexAttribArray(texCoordLocation);
+
+            texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+            const imageLocation = gl.getUniformLocation(program, 'u_image');
+            gl.uniform1i(imageLocation, 0);
+
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        }
     </script>
 </body>
 </html>
