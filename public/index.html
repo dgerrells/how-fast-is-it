@@ -35,27 +35,31 @@
     </div>
 
     <script>
-        const OP_CODE_FULL_FRAME = 0x01;
-        const OP_CODE_DELTA_FRAME = 0x02;
+        const OP_CODE_FRAME = 0x01;
+        const OP_CODE_SIM_DATA = 0x02;
 
         const canvas = document.getElementById('canvas');
         const host = window.location.host
         const ws = new WebSocket(`ws://${host}/ws`);
 
         let gl, program, texture, quadBuffer;
-        let camera = {
-            x: 0,
-            y: 0,
-            width: window.innerWidth,
-            height: window.innerHeight,
-        };
-        let pixelBuff = new Uint8Array(camera.width * camera.height);
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        let pixelBuff = new Uint8Array(width * height);
         let touchDown = false;
         let isPanning = false;
         let lastMouseX = 0;
         let lastMouseY = 0;
         let lastTouchX = 0;
         let lastTouchY = 0;
+        let serverSimData = {
+            camera: {
+                x: 0,
+                y: 0,
+            },
+            simWidth: 0,
+            simHeight: 0,
+        }
 
         ws.binaryType = 'arraybuffer';
 
@@ -67,19 +71,31 @@
 
         ws.onmessage = function(event) {
             const buff = new Uint8Array(event.data);
-            unpackBits(buff);
-            renderFrame(pixelBuff)
+            const opCode = buff[0];
+            const data = buff.subarray(1);
+            
+            if (opCode === OP_CODE_FRAME) {
+                unpackBits(data);
+                renderFrame(pixelBuff);
+            } else if (opCode === OP_CODE_SIM_DATA) {
+                const view = new DataView(data.buffer, data.byteOffset);
+                serverSimData.camera.x = view.getInt32(0, true);
+                serverSimData.camera.y = view.getInt32(4, true);
+                serverSimData.simWidth = view.getInt32(8, true);
+                serverSimData.simHeight = view.getInt32(12, true);
+
+            }
         };
 
         function resizeCanvas() {
-            camera.width = window.innerWidth;
-            camera.height = window.innerHeight;
-            canvas.width = camera.width;
-            canvas.height = camera.height;
-            canvas.style.width = `${camera.width}px`;
-            canvas.style.height = `${camera.height}px`;
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
             gl.viewport(0, 0, canvas.width, canvas.height);
-            pixelBuff = new Uint8Array(camera.width * camera.height);
+            pixelBuff = new Uint8Array(width * height);
             // Request a full frame with the new dimensions
             sendInput(0, 0, false);
         }
@@ -95,7 +111,7 @@
         }
 
         function unpackBits(data) {
-            const totalPixels = camera.width * camera.height;
+            const totalPixels = width * height;
             let pixelIndex = 0;
             for (let i = 0; i < data.length; i++) {
                 const byte = data[i];
@@ -114,7 +130,12 @@
 
             gl.bindTexture(gl.TEXTURE_2D, texture);
             gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, camera.width, camera.height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+            const cameraOffsetLocation = gl.getUniformLocation(program, 'u_cameraOffset');
+            const simSizeLocation = gl.getUniformLocation(program, 'u_simSize');
+    
+            gl.uniform2f(cameraOffsetLocation, serverSimData.camera.x, serverSimData.camera.y);
+            gl.uniform2f(simSizeLocation, serverSimData.simWidth, serverSimData.simHeight);
 
             gl.clearColor(0.0, 0.0, 0.0, 1.0);
             gl.clear(gl.COLOR_BUFFER_BIT);
@@ -130,23 +151,19 @@
             console.error("WebSocket error:", error);
         };
 
-        console.log(camera);
-
         function sendInput(x, y, isTouchDown, camDx = 0, camDy = 0) {
             // Buffer size is now 12 (input) + 16 (camera) = 28 bytes
             const buffer = new ArrayBuffer(28); 
             const view = new DataView(buffer);
             
-            // Input data
             view.setFloat32(0, x, true); 
             view.setFloat32(4, y, true); 
             view.setUint8(8, isTouchDown ? 1 : 0, true);
 
-            // Camera data
             view.setFloat32(9, -camDx, true);
             view.setFloat32(13, camDy, true);
-            view.setInt32(17, camera.width, true);
-            view.setInt32(21, camera.height, true);
+            view.setInt32(17, width, true);
+            view.setInt32(21, height, true);
 
             if (ws.readyState === WebSocket.OPEN) {
                 ws.send(buffer);
@@ -158,7 +175,7 @@
                 touchDown = true;
                 const rect = canvas.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const y = camera.height - (e.clientY - rect.top);
+                const y = height - (e.clientY - rect.top);
                 sendInput(x, y, touchDown);
             } else if (e.button === 2) {
                 touchDown = false;
@@ -179,7 +196,7 @@
             if (touchDown) {
                 const rect = canvas.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const y = camera.height - (e.clientY - rect.top);
+                const y = height - (e.clientY - rect.top);
                 sendInput(x, y, touchDown);
             } else if (isPanning) {
                 const dx = e.clientX - lastMouseX;
@@ -200,7 +217,7 @@
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
                 const x = touch.clientX - rect.left;
-                const y = camera.height - (touch.clientY - rect.top);
+                const y = height - (touch.clientY - rect.top);
                 sendInput(x, y, touchDown);
             } else if (e.touches.length === 2) {
                 touchDown = false;
@@ -224,7 +241,7 @@
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
                 const x = touch.clientX - rect.left;
-                const y = camera.height - (touch.clientY - rect.top);
+                const y = height - (touch.clientY - rect.top);
                 sendInput(x, y, touchDown);
             } else if (e.touches.length === 2) {
                 const currentTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
@@ -261,13 +278,18 @@
                 varying vec2 v_texCoord;
                 uniform sampler2D u_image;
 
+                uniform vec2 u_cameraOffset;
+                uniform vec2 u_simSize;
+
                 void main() {
-                    float x = v_texCoord.x;
-                    float y = v_texCoord.y;
+                    float worldX = (v_texCoord.x * u_cameraOffset.x) + u_cameraOffset.x;
+                    float worldY = (v_texCoord.y * u_cameraOffset.y) + u_cameraOffset.y;
+                    float normX = worldX / u_simSize.x;
+                    float normY = worldY / u_simSize.y;
+                    vec3 color = vec3(normX, normY, 1.0 - normX) + vec3(0.1);
                     
-                    vec3 color = vec3(x, y, 1.0 - y);
                     float mask = texture2D(u_image, v_texCoord).r;
-                    
+
                     gl_FragColor = vec4(color * mask, 1.0);
                 }
             `;

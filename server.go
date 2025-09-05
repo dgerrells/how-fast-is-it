@@ -55,6 +55,11 @@ type SimJob struct {
 	numClients int
 }
 
+const (
+	OpCodeFrame   byte = 0x01
+	OpCodeSimData byte = 0x02
+)
+
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -68,7 +73,7 @@ var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const numBuffers = 3
 const maxClients = 100
-const particleCount = 3000000
+const particleCount = 1000000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 4))
 var particlesPerThread = particleCount / numThreads
@@ -84,8 +89,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  2000,
-		height: 2000,
+		width:  5000,
+		height: 5000,
 	}
 )
 
@@ -93,7 +98,7 @@ func startSim() {
 	framePool := sync.Pool{
 		New: func() interface{} {
 			return &Frame{
-				data: make([]byte, int(simState.width*simState.height)/8),
+				data: make([]byte, simState.width*simState.height),
 			}
 		},
 	}
@@ -166,32 +171,20 @@ func startSim() {
 			y := int(p.y)
 			if x >= 0 && x < int(simState.width) && y >= 0 && y < int(simState.height) {
 				idx := (y*int(simState.width) + x)
-				if idx < int(simState.width*simState.height) {
-					byteIndex := idx / 8
-					bitOffset := idx % 8
-					if byteIndex < len(framebuffer) {
-						framebuffer[byteIndex] |= (1 << bitOffset)
+				if idx < len(framebuffer) {
+					if framebuffer[idx] < 255 {
+						framebuffer[idx]++
 					}
 				}
 			}
 		}
 
-		go func(data []byte) {
-			// var compressedBuffer bytes.Buffer
-			// zlibWriter := zlib.NewWriter(&compressedBuffer)
-			// if _, err := zlibWriter.Write(data); err != nil {
-			// 	log.Println("zlib write failed:", err)
-			// 	return
-			// }
-			// zlibWriter.Close()
-			// frame.Delta = data
-			select {
-			case framesChannel <- frame:
-			default:
-				log.Print("too slow")
-				framePool.Put(frame)
-			}
-		}(frame.data)
+		select {
+		case framesChannel <- frame:
+		default:
+			log.Print("too slow")
+			framePool.Put(frame)
+		}
 	}
 }
 
@@ -225,6 +218,8 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 				clients = append(clients[:i], clients[i+1:]...)
 				inputs[i] = Input{}
 				cameras[i] = ClientCam{}
+				cameras[i].X = float32(simState.width)/2 - 300
+				cameras[i].Y = float32(simState.height)/2 - 300
 				cameras[i].Width = 1
 				cameras[i].Height = 1
 				break
@@ -245,17 +240,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if mt == websocket.BinaryMessage {
 			reader := bytes.NewReader(message)
-			var input Input
+			var touchInput Input
 			// interpret x and y as offsets.
-			var cam ClientCam
+			var camInput ClientCam
 			// read input
-			errInput := binary.Read(reader, binary.LittleEndian, &input)
+			errInput := binary.Read(reader, binary.LittleEndian, &touchInput)
 			if errInput != nil {
 				log.Println("Binary read failed input:", errInput)
 				continue
 			}
 			// read cam input
-			errCam := binary.Read(reader, binary.LittleEndian, &cam)
+			errCam := binary.Read(reader, binary.LittleEndian, &camInput)
 			if errCam != nil {
 				log.Println("Binary read failed cam:", errCam)
 				continue
@@ -265,22 +260,60 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 			// this is fine as only chance of bad data is if someone connect or drops whilst updating input
 			idx := findClientIndex(conn)
 			if idx != -1 && idx < maxClients {
-				cameras[idx].Width = cam.Width
-				cameras[idx].Height = cam.Height
-				cameras[idx].X += cam.X
-				cameras[idx].Y += cam.Y
-				inputs[idx] = input
+
+				cameras[idx].Width = camInput.Width
+				cameras[idx].Height = camInput.Height
+				cameras[idx].X += camInput.X
+				cameras[idx].Y += camInput.Y
+				inputs[idx] = touchInput
 				inputs[idx].X += cameras[idx].X
 				inputs[idx].Y += cameras[idx].Y
+
+				// clamp to valid camera range
+				var cam = &cameras[idx]
+				x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
+
+				maxCamX := int32(simState.width) - width
+				if x < 0 {
+					x = 0
+					cam.X = 0
+				} else if x > maxCamX {
+					x = maxCamX
+					cam.X = float32(maxCamX)
+				}
+
+				maxCamY := int32(simState.height) - height
+				if y < 0 {
+					y = 0
+					cam.Y = 0
+				} else if y > maxCamY {
+					y = maxCamY
+					cam.Y = float32(maxCamY)
+				}
+
+				if x+width > int32(simState.width) {
+					width = int32(simState.width) - x
+				}
+				if y+height > int32(simState.height) {
+					height = int32(simState.height) - y
+				}
+
+				camMessage := new(bytes.Buffer)
+				camMessage.WriteByte(OpCodeSimData)
+				binary.Write(camMessage, binary.LittleEndian, x)
+				binary.Write(camMessage, binary.LittleEndian, y)
+				binary.Write(camMessage, binary.LittleEndian, simState.width)
+				binary.Write(camMessage, binary.LittleEndian, simState.height)
+
+				select {
+				case clientSendChannelMap[conn] <- camMessage.Bytes():
+				default:
+					log.Printf("Client %d's camera channel is full, dropping frame.", idx)
+				}
 			}
 		}
 	}
 }
-
-const (
-	OpCodeFrame   byte = 0x01
-	OpCodeSimSize byte = 0x02
-)
 
 func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 	for {
@@ -291,42 +324,19 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 		for i, conn := range clients {
 			cam := &cameras[i]
 			x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
-
-			maxCamX := int32(simState.width) - width
-			if x < 0 {
-				x = 0
-				cam.X = 0
-			} else if x > maxCamX {
-				x = maxCamX
-				cam.X = float32(maxCamX)
-			}
-
-			maxCamY := int32(simState.height) - height
-			if y < 0 {
-				y = 0
-				cam.Y = 0
-			} else if y > maxCamY {
-				y = maxCamY
-				cam.Y = float32(maxCamY)
-			}
-
-			if x+width > int32(simState.width) {
-				width = int32(simState.width) - x
-			}
-			if y+height > int32(simState.height) {
-				height = int32(simState.height) - y
-			}
-			dataToSend := make([]byte, (width*height+7)/8)
+			dataToSend := make([]byte, (width*height+7)/8+1)
+			dataToSend[0] = OpCodeFrame
 
 			for row := int32(0); row < height; row++ {
 				for col := int32(0); col < width; col++ {
-					mainFrameIndex := ((y+row)*int32(simState.width) + (x + col))
-					dataToSendIndex := (row*width + col)
+					fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
+					bitPackedIndex := row*width + col
 
-					if mainFrameIndex/8 < int32(len(frameBuffer)) && dataToSendIndex/8 < int32(len(dataToSend)) {
-						isSet := (frameBuffer[mainFrameIndex/8] >> (mainFrameIndex % 8)) & 1
-						if isSet == 1 {
-							dataToSend[dataToSendIndex/8] |= (1 << (dataToSendIndex % 8))
+					if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
+						byteIndex := bitPackedIndex/8 + 1 // offset for opp code
+						bitOffset := bitPackedIndex % 8
+						if byteIndex < int32(len(dataToSend)) {
+							dataToSend[byteIndex] |= (1 << bitOffset)
 						}
 					}
 				}
@@ -376,8 +386,8 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 					dirx := input.X - particles[p].x
 					diry := input.Y - particles[p].y
 					dist := dirx*dirx + diry*diry
-					if dist < 100000 && dist > 1 {
-						var grav = 4 / float32(math.Sqrt(float64(dist)))
+					if dist < 34000 && dist > 1 {
+						var grav = 6 / float32(math.Sqrt(float64(dist)))
 						particles[p].dx += dirx * job.simState.dt * grav * 3
 						particles[p].dy += diry * job.simState.dt * grav * 3
 					}
