@@ -132,9 +132,11 @@
             gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
             gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
             const cameraOffsetLocation = gl.getUniformLocation(program, 'u_cameraOffset');
+            const cameraSizeLocation = gl.getUniformLocation(program, 'u_cameraSize');
             const simSizeLocation = gl.getUniformLocation(program, 'u_simSize');
     
             gl.uniform2f(cameraOffsetLocation, serverSimData.camera.x, serverSimData.camera.y);
+            gl.uniform2f(cameraSizeLocation, width, height);
             gl.uniform2f(simSizeLocation, serverSimData.simWidth, serverSimData.simHeight);
 
             gl.clearColor(0.0, 0.0, 0.0, 1.0);
@@ -279,11 +281,12 @@
                 uniform sampler2D u_image;
 
                 uniform vec2 u_cameraOffset;
+                uniform vec2 u_cameraSize;
                 uniform vec2 u_simSize;
 
                 void main() {
-                    float worldX = (v_texCoord.x * u_cameraOffset.x) + u_cameraOffset.x;
-                    float worldY = (v_texCoord.y * u_cameraOffset.y) + u_cameraOffset.y;
+                    float worldX = (v_texCoord.x * u_cameraSize.x) + u_cameraOffset.x;
+                    float worldY = (v_texCoord.y * u_cameraSize.y) + u_cameraOffset.y;
                     float normX = worldX / u_simSize.x;
                     float normY = worldY / u_simSize.y;
                     vec3 color = vec3(normX, normY, 1.0 - normX) + vec3(0.1);
