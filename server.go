@@ -89,8 +89,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  5000,
-		height: 5000,
+		width:  3000,
+		height: 3000,
 	}
 )
 
