@@ -73,7 +73,7 @@ var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const numBuffers = 3
 const maxClients = 100
-const particleCount = 5000000
+const particleCount = 1000000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
