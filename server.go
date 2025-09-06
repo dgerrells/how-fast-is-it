@@ -73,8 +73,8 @@ var upgrader = websocket.Upgrader{
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const numBuffers = 2
-const maxClients = 12
-const particleCount = 1_000_000
+const maxClients = 1000
+const particleCount = 10_000_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
