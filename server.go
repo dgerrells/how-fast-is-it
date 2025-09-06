@@ -53,6 +53,7 @@ type SimJob struct {
 	simState   SimState
 	inputs     [maxClients]Input
 	numClients int
+	frameData  *[]byte
 }
 
 const (
@@ -71,9 +72,9 @@ var upgrader = websocket.Upgrader{
 // var clientSendChannels [maxClients]chan []byte
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
-const numBuffers = 3
-const maxClients = 100
-const particleCount = 1000000
+const numBuffers = 2
+const maxClients = 12
+const particleCount = 1_000_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
@@ -89,8 +90,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  1000,
-		height: 1000,
+		width:  3000,
+		height: 3000,
 	}
 )
 
@@ -134,8 +135,9 @@ func startSim() {
 		simState.dt = float32(now.Sub(lastTime).Seconds())
 		lastTime = now
 
-		if frameCount%60 == 0 {
+		if frameCount%30 == 0 {
 			log.Println(simState.dt)
+			log.Println(fmt.Sprintf("FPS: %f", 1/simState.dt))
 		}
 
 		wg.Add(numThreads)
@@ -144,46 +146,32 @@ func startSim() {
 		// but we want to maybe support 10k inputs so better to only check what is connected.
 		numClients := len(clients)
 
-		for i := 0; i < numThreads; i++ {
-			startIndex := i * particlesPerThread
-			endIndex := startIndex + particlesPerThread
-			if i == numThreads-1 {
-				endIndex = particleCount
-			}
-			jobs <- SimJob{startIndex, endIndex, simState, inputs, numClients}
-		}
-
-		// wait for them to complete
-		wg.Wait()
-
-		if frameCount%2 == 0 {
-			continue
-		}
-
+		// frame
 		frame := framePool.Get().(*Frame)
 		framebuffer := frame.data
 		for i := range framebuffer {
 			framebuffer[i] = 0
 		}
 
-		for _, p := range particles {
-			x := int(p.x)
-			y := int(p.y)
-			if x >= 0 && x < int(simState.width) && y >= 0 && y < int(simState.height) {
-				idx := (y*int(simState.width) + x)
-				if idx < len(framebuffer) {
-					if framebuffer[idx] < 255 {
-						framebuffer[idx]++
-					}
-				}
+		for i := 0; i < numThreads; i++ {
+			startIndex := i * particlesPerThread
+			endIndex := startIndex + particlesPerThread
+			if i == numThreads-1 {
+				endIndex = particleCount
 			}
+			jobs <- SimJob{startIndex, endIndex, simState, inputs, numClients, &framebuffer}
 		}
 
-		select {
-		case framesChannel <- frame:
-		default:
-			log.Print("too slow")
-			framePool.Put(frame)
+		// wait for them to complete
+		wg.Wait()
+
+		if frameCount%2 == 0 {
+			select {
+			case framesChannel <- frame:
+			default:
+				log.Print("too slow")
+				framePool.Put(frame)
+			}
 		}
 	}
 }
@@ -203,7 +191,7 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clients = append(clients, conn)
-	clientSendChannelMap[conn] = make(chan []byte)
+	clientSendChannelMap[conn] = make(chan []byte, 2)
 
 	clientsMu.Unlock()
 
@@ -293,22 +281,11 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 
 				if x+width > int32(simState.width) {
 					width = int32(simState.width) - x
+					cam.Width = width
 				}
 				if y+height > int32(simState.height) {
 					height = int32(simState.height) - y
-				}
-
-				camMessage := new(bytes.Buffer)
-				camMessage.WriteByte(OpCodeSimData)
-				binary.Write(camMessage, binary.LittleEndian, x)
-				binary.Write(camMessage, binary.LittleEndian, y)
-				binary.Write(camMessage, binary.LittleEndian, simState.width)
-				binary.Write(camMessage, binary.LittleEndian, simState.height)
-
-				select {
-				case clientSendChannelMap[conn] <- camMessage.Bytes():
-				default:
-					log.Printf("Client %d's camera channel is full, dropping frame.", idx)
+					cam.Height = height
 				}
 			}
 		}
@@ -347,6 +324,18 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 			default:
 				log.Printf("Client %d's channel is full, dropping frame.", i)
 			}
+
+			camMessage := new(bytes.Buffer)
+			camMessage.WriteByte(OpCodeSimData)
+			binary.Write(camMessage, binary.LittleEndian, x)
+			binary.Write(camMessage, binary.LittleEndian, y)
+			binary.Write(camMessage, binary.LittleEndian, simState.width)
+			binary.Write(camMessage, binary.LittleEndian, simState.height)
+			select {
+			case clientSendChannelMap[conn] <- camMessage.Bytes():
+			default:
+				log.Printf("Client %d's camera channel is full, dropping frame.", i)
+			}
 		}
 		clientsMu.Unlock()
 		pool.Put(frame)
@@ -379,18 +368,25 @@ func findClientIndex(conn *websocket.Conn) int {
 
 func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 	for job := range jobs {
+		var validInputs []Input
+		var frame = *job.frameData
+		for _, input := range job.inputs {
+			if input.IsTouchDown {
+				validInputs = append(validInputs, input)
+			}
+		}
+		var fSimWidth = float32(job.simState.width)
+		var fSimHeight = float32(job.simState.height)
+
 		for p := job.startIndex; p < job.endIndex; p++ {
-			for i := 0; i < job.numClients; i++ {
-				input := job.inputs[i]
-				if input.IsTouchDown {
-					dirx := input.X - particles[p].x
-					diry := input.Y - particles[p].y
-					dist := dirx*dirx + diry*diry
-					if dist < 34000 && dist > 1 {
-						var grav = 6 / float32(math.Sqrt(float64(dist)))
-						particles[p].dx += dirx * job.simState.dt * grav * 3
-						particles[p].dy += diry * job.simState.dt * grav * 3
-					}
+			for _, input := range validInputs {
+				dirx := input.X - particles[p].x
+				diry := input.Y - particles[p].y
+				dist := dirx*dirx + diry*diry
+				if dist < 34000 && dist > 1 {
+					var grav = 6 / float32(math.Sqrt(float64(dist)))
+					particles[p].dx += dirx * job.simState.dt * grav * 3
+					particles[p].dy += diry * job.simState.dt * grav * 3
 				}
 			}
 
@@ -399,14 +395,28 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 			particles[p].dx *= friction
 			particles[p].dy *= friction
 
-			if particles[p].x < 0 || particles[p].x >= float32(job.simState.width) {
+			if particles[p].x < 0 || particles[p].x >= fSimWidth {
 				particles[p].x -= particles[p].dx
 				particles[p].dx *= -1
 			}
-			if particles[p].y < 0 || particles[p].y >= float32(job.simState.height) {
+			if particles[p].y < 0 || particles[p].y >= fSimHeight {
 				particles[p].y -= particles[p].dy
 				particles[p].dy *= -1
 			}
+
+			if frameCount%2 == 0 {
+				x := uint32(particles[p].x)
+				y := uint32(particles[p].y)
+				if x >= 0 && x < job.simState.width && y >= 0 && y < simState.height {
+					idx := (y*simState.width + x)
+					// if idx < len(framebuffer) {
+					// if framebuffer[idx] < 255 {
+					frame[idx] = 1
+					// }
+					// }
+				}
+			}
+
 		}
 		wg.Done()
 	}
