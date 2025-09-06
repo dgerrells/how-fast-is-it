@@ -74,12 +74,12 @@ var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const numBuffers = 2
 const maxClients = 1000
-const particleCount = 10_000_000
+const particleCount = 2_000_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
 
-const friction = 0.99
+const friction = 0.988
 
 var (
 	clients    []*websocket.Conn
@@ -300,29 +300,32 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 		clientsMu.Lock()
 		for i, conn := range clients {
 			cam := &cameras[i]
-			x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
+			var x, y, width, height = int32(cam.X), int32(cam.Y), cam.Width, cam.Height
 			dataToSend := make([]byte, (width*height+7)/8+1)
 			dataToSend[0] = OpCodeFrame
+			var isValidCamSize = width < int32(simState.width) && height < int32(simState.height) && width > 0 && height > 0
 
-			for row := int32(0); row < height; row++ {
-				for col := int32(0); col < width; col++ {
-					fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
-					bitPackedIndex := row*width + col
+			if isValidCamSize {
+				for row := int32(0); row < height; row++ {
+					for col := int32(0); col < width; col++ {
+						fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
+						bitPackedIndex := row*width + col
 
-					if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
-						byteIndex := bitPackedIndex/8 + 1 // offset for opp code
-						bitOffset := bitPackedIndex % 8
-						if byteIndex < int32(len(dataToSend)) {
-							dataToSend[byteIndex] |= (1 << bitOffset)
+						if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
+							byteIndex := bitPackedIndex/8 + 1 // offset for opp code
+							bitOffset := bitPackedIndex % 8
+							if byteIndex < int32(len(dataToSend)) {
+								dataToSend[byteIndex] |= (1 << bitOffset)
+							}
 						}
 					}
 				}
-			}
 
-			select {
-			case clientSendChannelMap[conn] <- dataToSend:
-			default:
-				log.Printf("Client %d's channel is full, dropping frame.", i)
+				select {
+				case clientSendChannelMap[conn] <- dataToSend:
+				default:
+					log.Printf("Client %d's channel is full, dropping frame.", i)
+				}
 			}
 
 			camMessage := new(bytes.Buffer)
@@ -370,6 +373,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 	for job := range jobs {
 		var validInputs []Input
 		var frame = *job.frameData
+		var frictionFactor = float32(math.Pow(float64(friction), float64(job.simState.dt*60)))
 		for _, input := range job.inputs {
 			if input.IsTouchDown {
 				validInputs = append(validInputs, input)
@@ -392,8 +396,8 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 
 			particles[p].x += particles[p].dx
 			particles[p].y += particles[p].dy
-			particles[p].dx *= friction
-			particles[p].dy *= friction
+			particles[p].dx *= frictionFactor
+			particles[p].dy *= frictionFactor
 
 			if particles[p].x < 0 || particles[p].x >= fSimWidth {
 				particles[p].x -= particles[p].dx
