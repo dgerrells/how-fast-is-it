@@ -8,8 +8,9 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"unsafe"
 
-	// _ "net/http/pprof"
+	_ "net/http/pprof"
 	"runtime"
 	"sync"
 	"time"
@@ -51,7 +52,7 @@ type SimJob struct {
 	startIndex int
 	endIndex   int
 	simState   SimState
-	inputs     [maxClients]Input
+	inputs     *[maxClients]Input
 	numClients int
 	frameData  *[]byte
 }
@@ -72,7 +73,7 @@ var upgrader = websocket.Upgrader{
 // var clientSendChannels [maxClients]chan []byte
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
-const numBuffers = 2
+const numBuffers = 3
 const maxClients = 1000
 const particleCount = 2_000_000
 
@@ -159,7 +160,7 @@ func startSim() {
 			if i == numThreads-1 {
 				endIndex = particleCount
 			}
-			jobs <- SimJob{startIndex, endIndex, simState, inputs, numClients, &framebuffer}
+			jobs <- SimJob{startIndex, endIndex, simState, &inputs, numClients, &framebuffer}
 		}
 
 		// wait for them to complete
@@ -292,6 +293,27 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var uint64ToByteLUT = make(map[uint64]byte)
+
+func init() {
+	var byteSlice = make([]byte, 8)
+	for i := 0; i < 256; i++ {
+		for bit := 0; bit < 8; bit++ {
+			if (i>>bit)&1 == 1 {
+				byteSlice[bit] = 1
+			} else {
+				byteSlice[bit] = 0
+			}
+			// byteSlice[bit] = packedByte
+		}
+		uint64ToByteLUT[BytesToUint64Unsafe(byteSlice)] = byte(i)
+	}
+}
+
+func BytesToUint64Unsafe(b []byte) uint64 {
+	return *(*uint64)(unsafe.Pointer(&b[0]))
+}
+
 func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 	for {
 		frame := <-ch
@@ -301,22 +323,51 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 		for i, conn := range clients {
 			cam := &cameras[i]
 			var x, y, width, height = int32(cam.X), int32(cam.Y), cam.Width, cam.Height
-			dataToSend := make([]byte, (width*height+7)/8+1)
-			dataToSend[0] = OpCodeFrame
 			var isValidCamSize = width < int32(simState.width) && height < int32(simState.height) && width > 0 && height > 0
 
 			if isValidCamSize {
-				for row := int32(0); row < height; row++ {
-					for col := int32(0); col < width; col++ {
-						fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
-						bitPackedIndex := row*width + col
+				// dataToSend := make([]byte, (width*height+7)/8+1)
+				// dataToSend[0] = OpCodeFrame
 
-						if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
-							byteIndex := bitPackedIndex/8 + 1 // offset for opp code
-							bitOffset := bitPackedIndex % 8
-							if byteIndex < int32(len(dataToSend)) {
-								dataToSend[byteIndex] |= (1 << bitOffset)
-							}
+				// for row := int32(0); row < height; row++ {
+				// 	var iRow = (y + row) * int32(simState.width)
+				// 	var rw = row * width
+
+				// 	for col := int32(0); col < width; col++ {
+				// 		fullBufferIndex := iRow + (x + col)
+				// 		bitPackedIndex := rw + col
+
+				// 		if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
+				// 			byteIndex := (bitPackedIndex >> 3) + 1 // offset for opp code
+				// 			bitOffset := bitPackedIndex & 7
+				// 			if byteIndex < int32(len(dataToSend)) {
+				// 				dataToSend[byteIndex] |= (1 << bitOffset)
+				// 			}
+				// 		}
+				// 	}
+				// }
+
+				dataToSendSize := (width*height+7)/8 + 1
+				dataToSend := make([]byte, dataToSendSize)
+				dataToSend[0] = OpCodeFrame
+				outputByteIndex := int32(1)
+
+				for row := int32(0); row < height; row++ {
+					for col := int32(0); col < width; col += 8 {
+						fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
+
+						if fullBufferIndex+8 > int32(len(frameBuffer)) {
+							break
+						}
+
+						chunk := frameBuffer[fullBufferIndex : fullBufferIndex+8]
+						key := BytesToUint64Unsafe(chunk)
+
+						packedByte, _ := uint64ToByteLUT[key]
+
+						if outputByteIndex < int32(len(dataToSend)) {
+							dataToSend[outputByteIndex] = packedByte
+							outputByteIndex++
 						}
 					}
 				}
@@ -399,19 +450,19 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 			particles[p].dx *= frictionFactor
 			particles[p].dy *= frictionFactor
 
-			if particles[p].x < 0 || particles[p].x >= fSimWidth {
-				particles[p].x -= particles[p].dx
-				particles[p].dx *= -1
-			}
-			if particles[p].y < 0 || particles[p].y >= fSimHeight {
-				particles[p].y -= particles[p].dy
-				particles[p].dy *= -1
-			}
+			// if particles[p].x < 0 || particles[p].x >= fSimWidth {
+			// 	particles[p].x -= particles[p].dx
+			// 	particles[p].dx *= -1
+			// }
+			// if particles[p].y < 0 || particles[p].y >= fSimHeight {
+			// 	particles[p].y -= particles[p].dy
+			// 	particles[p].dy *= -1
+			// }
 
 			if frameCount%2 == 0 {
-				x := uint32(particles[p].x)
-				y := uint32(particles[p].y)
-				if x >= 0 && x < job.simState.width && y >= 0 && y < simState.height {
+				if particles[p].x >= 0 && particles[p].x < fSimWidth && particles[p].y >= 0 && particles[p].y < fSimHeight {
+					x := uint32(particles[p].x)
+					y := uint32(particles[p].y)
 					idx := (y*simState.width + x)
 					// if idx < len(framebuffer) {
 					// if framebuffer[idx] < 255 {

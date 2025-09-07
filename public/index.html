@@ -52,6 +52,13 @@
         let lastMouseY = 0;
         let lastTouchX = 0;
         let lastTouchY = 0;
+        let isFirstFrame = true;
+
+        const edgeMoveSpeed = 10;
+        const edgeMoveThreshold = Math.max(20, window.innerWidth*0.05);
+        let edgeMoveX = width / 2
+        let edgeMoveY = height / 2
+
         let serverSimData = {
             camera: {
                 x: 0,
@@ -74,7 +81,7 @@
             const opCode = buff[0];
             const data = buff.subarray(1);
             
-            if (opCode === OP_CODE_FRAME) {
+            if (opCode === OP_CODE_FRAME && !isFirstFrame) {
                 unpackBits(data);
                 renderFrame(pixelBuff);
             } else if (opCode === OP_CODE_SIM_DATA) {
@@ -83,7 +90,7 @@
                 serverSimData.camera.y = view.getInt32(4, true);
                 serverSimData.simWidth = view.getInt32(8, true);
                 serverSimData.simHeight = view.getInt32(12, true);
-
+                isFirstFrame = false;
             }
         };
 
@@ -194,6 +201,14 @@
             sendInput(0, 0, touchDown);
         });
 
+        document.addEventListener('mouseleave', (e) => {
+            isPanning = false;
+            touchDown = false;
+            edgeMoveX = width / 2;
+            edgeMoveY = height / 2;
+            sendInput(0, 0, touchDown);
+        });
+
         document.addEventListener('mousemove', (e) => {
             if (touchDown) {
                 const rect = canvas.getBoundingClientRect();
@@ -207,6 +222,9 @@
                 lastMouseY = e.clientY;
                 sendInput(0, 0, false, dx, dy); 
             }
+
+            edgeMoveX = e.clientX;
+            edgeMoveY = e.clientY;
         });
 
         canvas.addEventListener('contextmenu', (e) => e.preventDefault());
@@ -254,9 +272,38 @@
                 lastTouchY = currentTouchY;
                 sendInput(0, 0, false, dx, dy); 
             }
+
+            const touch = e.touches[0];
+            edgeMoveX = touch.clientX;
+            edgeMoveY = touch.clientY;
         }, {
             passive: false
         });
+
+
+        setInterval(() => {
+            if (isPanning) {
+                return;
+            }
+
+            let camDx = 0;
+            let camDy = 0;
+            if (edgeMoveX < edgeMoveThreshold) {
+                camDx += edgeMoveSpeed;
+            } else if (edgeMoveX > width - edgeMoveThreshold) {
+                camDx -= edgeMoveSpeed;
+            }
+
+            if (edgeMoveY < edgeMoveThreshold) {
+                camDy = edgeMoveSpeed;
+            } else if (edgeMoveY > height - edgeMoveThreshold) {
+                camDy = -edgeMoveSpeed;
+            }
+
+            if (camDx !== 0 || camDy !== 0) {
+                sendInput(0, 0, false, camDx, camDy);
+            }
+        }, 20)
 
         function setupWebGL() {
             gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
