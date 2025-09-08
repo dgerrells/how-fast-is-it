@@ -326,40 +326,15 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 			var isValidCamSize = width < int32(simState.width) && height < int32(simState.height) && width > 0 && height > 0
 
 			if isValidCamSize {
-				// dataToSend := make([]byte, (width*height+7)/8+1)
-				// dataToSend[0] = OpCodeFrame
-
-				// for row := int32(0); row < height; row++ {
-				// 	var iRow = (y + row) * int32(simState.width)
-				// 	var rw = row * width
-
-				// 	for col := int32(0); col < width; col++ {
-				// 		fullBufferIndex := iRow + (x + col)
-				// 		bitPackedIndex := rw + col
-
-				// 		if fullBufferIndex < int32(len(frameBuffer)) && frameBuffer[fullBufferIndex] > 0 {
-				// 			byteIndex := (bitPackedIndex >> 3) + 1 // offset for opp code
-				// 			bitOffset := bitPackedIndex & 7
-				// 			if byteIndex < int32(len(dataToSend)) {
-				// 				dataToSend[byteIndex] |= (1 << bitOffset)
-				// 			}
-				// 		}
-				// 	}
-				// }
-
 				dataToSendSize := (width*height+7)/8 + 1
 				dataToSend := make([]byte, dataToSendSize)
 				dataToSend[0] = OpCodeFrame
 				outputByteIndex := int32(1)
 
 				for row := int32(0); row < height; row++ {
+					yOffset := (y + row) * int32(simState.width)
 					for col := int32(0); col < width; col += 8 {
-						fullBufferIndex := (y+row)*int32(simState.width) + (x + col)
-
-						if fullBufferIndex+8 > int32(len(frameBuffer)) {
-							break
-						}
-
+						fullBufferIndex := yOffset + (x + col)
 						chunk := frameBuffer[fullBufferIndex : fullBufferIndex+8]
 						key := BytesToUint64Unsafe(chunk)
 
@@ -432,43 +407,43 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 		}
 		var fSimWidth = float32(job.simState.width)
 		var fSimHeight = float32(job.simState.height)
+		var gravPower = job.simState.dt * 18
+		var pullDist float32 = 34000
 
-		for p := job.startIndex; p < job.endIndex; p++ {
+		for i := job.startIndex; i < job.endIndex; i++ {
+			p := &particles[i]
+
 			for _, input := range validInputs {
-				dirx := input.X - particles[p].x
-				diry := input.Y - particles[p].y
+				dirx := input.X - p.x
+				diry := input.Y - p.y
 				dist := dirx*dirx + diry*diry
-				if dist < 34000 && dist > 1 {
-					var grav = 6 / float32(math.Sqrt(float64(dist)))
-					particles[p].dx += dirx * job.simState.dt * grav * 3
-					particles[p].dy += diry * job.simState.dt * grav * 3
+				if dist < pullDist && dist > 1 {
+					var grav = 1 / float32(math.Sqrt(float64(dist)))
+					p.dx += dirx * gravPower * grav
+					p.dy += diry * gravPower * grav
 				}
 			}
 
-			particles[p].x += particles[p].dx
-			particles[p].y += particles[p].dy
-			particles[p].dx *= frictionFactor
-			particles[p].dy *= frictionFactor
+			p.x += p.dx
+			p.y += p.dy
+			p.dx *= frictionFactor
+			p.dy *= frictionFactor
 
-			// if particles[p].x < 0 || particles[p].x >= fSimWidth {
-			// 	particles[p].x -= particles[p].dx
-			// 	particles[p].dx *= -1
-			// }
-			// if particles[p].y < 0 || particles[p].y >= fSimHeight {
-			// 	particles[p].y -= particles[p].dy
-			// 	particles[p].dy *= -1
-			// }
+			if p.x < 0 || p.x >= fSimWidth {
+				p.x -= p.dx
+				p.dx *= -1
+			}
+			if p.y < 0 || p.y >= fSimHeight {
+				p.y -= p.dy
+				p.dy *= -1
+			}
 
 			if frameCount%2 == 0 {
-				if particles[p].x >= 0 && particles[p].x < fSimWidth && particles[p].y >= 0 && particles[p].y < fSimHeight {
-					x := uint32(particles[p].x)
-					y := uint32(particles[p].y)
+				if p.x >= 0 && p.x < fSimWidth && p.y >= 0 && p.y < fSimHeight {
+					x := uint32(p.x)
+					y := uint32(p.y)
 					idx := (y*simState.width + x)
-					// if idx < len(framebuffer) {
-					// if framebuffer[idx] < 255 {
 					frame[idx] = 1
-					// }
-					// }
 				}
 			}
 

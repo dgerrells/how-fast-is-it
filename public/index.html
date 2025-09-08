@@ -21,6 +21,10 @@
             cursor: default !important;
             overflow: hidden;
         }
+        body > div {
+            overflow: hidden;
+            width: 100%;
+        }
         #canvas {
             border-radius: 0.5rem;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
@@ -52,10 +56,13 @@
         let lastMouseY = 0;
         let lastTouchX = 0;
         let lastTouchY = 0;
+        let inputX = 0;
+        let inputY = 0;
         let isFirstFrame = true;
+        let isMobile = isLikelyMobile();
 
-        const edgeMoveSpeed = 10;
-        const edgeMoveThreshold = Math.max(20, window.innerWidth*0.05);
+        const edgeMoveSpeed = isMobile ? 2.6 : 10;
+        const edgeMoveThreshold = Math.max(isMobile ? 16 : 20, window.innerWidth*0.05);
         let edgeMoveX = width / 2
         let edgeMoveY = height / 2
 
@@ -66,6 +73,15 @@
             },
             simWidth: 0,
             simHeight: 0,
+        }
+
+        // optimize lookup map
+        const byteToPixels = new Uint8Array(256 * 8);
+        for (let i = 0; i < 256; i++) {
+            for (let bit = 0; bit < 8; bit++) {
+                const pixelValue = ((i >> bit) & 1) ? 255 : 0;
+                byteToPixels[i * 8 + bit] = pixelValue;
+            }
         }
 
         ws.binaryType = 'arraybuffer';
@@ -94,8 +110,10 @@
             }
         };
 
+        window.addEventListener('resize', resizeCanvas);
+
         function resizeCanvas() {
-            width = window.innerWidth;
+            width = Math.ceil(window.innerWidth / 8) * 8;
             height = window.innerHeight;
             canvas.width = width;
             canvas.height = height;
@@ -105,16 +123,6 @@
             pixelBuff = new Uint8Array(width * height);
             // Request a full frame with the new dimensions
             sendInput(0, 0, false);
-        }
-
-        window.addEventListener('resize', resizeCanvas);
-
-        const byteToPixels = new Uint8Array(256 * 8);
-        for (let i = 0; i < 256; i++) {
-            for (let bit = 0; bit < 8; bit++) {
-                const pixelValue = ((i >> bit) & 1) ? 255 : 0;
-                byteToPixels[i * 8 + bit] = pixelValue;
-            }
         }
 
         function unpackBits(data) {
@@ -161,7 +169,7 @@
         };
 
         function sendInput(x, y, isTouchDown, camDx = 0, camDy = 0) {
-            // Buffer size is now 12 (input) + 16 (camera) = 28 bytes
+            // buffer size is 12 (input) + 16 (camera) = 28 bytes
             const buffer = new ArrayBuffer(28); 
             const view = new DataView(buffer);
             
@@ -183,9 +191,9 @@
             if (e.button === 0) {
                 touchDown = true;
                 const rect = canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const y = height - (e.clientY - rect.top);
-                sendInput(x, y, touchDown);
+                inputX = e.clientX - rect.left;
+                inputY = height - (e.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
             } else if (e.button === 2) {
                 touchDown = false;
                 isPanning = true;
@@ -212,9 +220,9 @@
         document.addEventListener('mousemove', (e) => {
             if (touchDown) {
                 const rect = canvas.getBoundingClientRect();
-                const x = e.clientX - rect.left;
-                const y = height - (e.clientY - rect.top);
-                sendInput(x, y, touchDown);
+                inputX = e.clientX - rect.left;
+                inputY = height - (e.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
             } else if (isPanning) {
                 const dx = e.clientX - lastMouseX;
                 const dy = e.clientY - lastMouseY;
@@ -236,9 +244,11 @@
                 touchDown = true;
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
-                const x = touch.clientX - rect.left;
-                const y = height - (touch.clientY - rect.top);
-                sendInput(x, y, touchDown);
+                inputX = touch.clientX - rect.left;
+                inputY = height - (touch.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+                edgeMoveX = touch.clientX;
+                edgeMoveY = touch.clientY;
             } else if (e.touches.length === 2) {
                 touchDown = false;
                 isPanning = true;
@@ -252,6 +262,8 @@
         document.addEventListener('touchend', (e) => {
             touchDown = false;
             isPanning = false;
+            edgeMoveX = width / 2;
+            edgeMoveY = height / 2;
             sendInput(0, 0, touchDown);
         });
 
@@ -260,9 +272,11 @@
             if (e.touches.length === 1 && touchDown) {
                 const rect = canvas.getBoundingClientRect();
                 const touch = e.touches[0];
-                const x = touch.clientX - rect.left;
-                const y = height - (touch.clientY - rect.top);
-                sendInput(x, y, touchDown);
+                inputX = touch.clientX - rect.left;
+                inputY = height - (touch.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+                edgeMoveX = touch.clientX;
+                edgeMoveY = touch.clientY;
             } else if (e.touches.length === 2) {
                 const currentTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
                 const currentTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
@@ -272,17 +286,13 @@
                 lastTouchY = currentTouchY;
                 sendInput(0, 0, false, dx, dy); 
             }
-
-            const touch = e.touches[0];
-            edgeMoveX = touch.clientX;
-            edgeMoveY = touch.clientY;
         }, {
             passive: false
         });
 
 
         setInterval(() => {
-            if (isPanning) {
+            if (isPanning || (touchDown && !isMobile)) {
                 return;
             }
 
@@ -301,9 +311,11 @@
             }
 
             if (camDx !== 0 || camDy !== 0) {
-                sendInput(0, 0, false, camDx, camDy);
+                inputX -= camDx / 2;
+                inputY += camDy / 2;
+                sendInput(inputX, inputY, touchDown, camDx, camDy);
             }
-        }, 20)
+        }, 8)
 
         function setupWebGL() {
             gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
@@ -336,11 +348,12 @@
                     float worldY = (v_texCoord.y * u_cameraSize.y) + u_cameraOffset.y;
                     float normX = worldX / u_simSize.x;
                     float normY = worldY / u_simSize.y;
-                    vec3 color = vec3(normX, normY, 1.0 - normX) + vec3(0.1);
+                    vec3 color = vec3(normX, normY, 1.0 - normX);
                     
-                    float mask = texture2D(u_image, v_texCoord).r + 0.025;
+                    float mask = texture2D(u_image, v_texCoord).r;
+                    vec3 finalColor = mix(vec3(0), color, mask * 1.2);
 
-                    gl_FragColor = vec4(color * mask, 1.0) + vec4(0.025);
+                   gl_FragColor = vec4(finalColor, 1.0);
                 }
             `;
             
@@ -403,6 +416,10 @@
             gl.uniform1i(imageLocation, 0);
 
             gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        }
+
+        function isLikelyMobile() {
+            return ('ontouchstart' in window || navigator.maxTouchPoints) || window.innerWidth <= 600;
         }
     </script>
 </body>
