@@ -470,7 +470,7 @@
             const canvas = document.getElementById('canvas');
             const invertBtn = document.getElementById('invert-btn');
 
-            invertBtn.addEventListener('click', () => {
+            const toggleInvert = () => {
                 const currentFilter = canvas.style.filter;
                 if (currentFilter.includes('invert')) {
                     canvas.style.filter = '';
@@ -479,6 +479,11 @@
                     canvas.style.filter = 'invert(.88)';
                     invertBtn.classList.add('active');
                 }
+            };
+
+            invertBtn.addEventListener('click', toggleInvert);
+            invertBtn.addEventListener('touchstart', (e) => {
+                toggleInvert();
             });
         });
     </script>
