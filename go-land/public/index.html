@@ -30,11 +30,51 @@
             background-color: black;
             border: 0px solid #232d3a;
         }
+
+    .icon-button {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background-color: #2a2a2a;
+        border: 1px solid #3d3d3d;
+        border-radius: 50%;
+        width: 48px;
+        height: 48px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        cursor: pointer;
+        transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+        z-index: 1000;
+        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+    }
+    .icon-button:active {
+        transform: scale(0.95);
+    }
+    .icon-button:hover {
+        background-color: #3d3d3d;
+        border-color: #555555;
+        transform: scale(1.05);
+    }
+    .icon-button svg {
+        width: 24px;
+        height: 24px;
+        color: #c9d1d9;
+        transition: color 0.2s ease;
+    }
+    .icon-button.active svg {
+        color: #fce300;
+    }
     </style>
 </head>
 <body>
     <div>
         <canvas id="canvas"></canvas>
+    </div>
+    <div id="invert-btn" class="icon-button">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2.25a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V3a.75.75 0 0 1 .75-.75ZM7.5 12a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM18.894 6.166a.75.75 0 0 0-1.06-1.06l-1.591 1.59a.75.75 0 1 0 1.06 1.06l1.59-1.591ZM5.007 17.592a.75.75 0 0 0-1.06-1.06l-1.59 1.59a.75.75 0 0 0 1.06 1.06l1.59-1.591ZM12 18a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V18a.75.75 0 0 1 .75-.75ZM18.894 17.592l-1.59-1.591a.75.75 0 0 0-1.06 1.06l1.59 1.591a.75.75 0 0 0 1.06-1.06ZM5.007 6.166a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 0 0-1.06 1.06l1.59 1.591Z" />
+        </svg>
     </div>
 
     <script>
@@ -421,6 +461,23 @@
         function isLikelyMobile() {
             return ('ontouchstart' in window || navigator.maxTouchPoints) || window.innerWidth <= 600;
         }
+
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('canvas');
+            const invertBtn = document.getElementById('invert-btn');
+
+            invertBtn.addEventListener('click', () => {
+                const currentFilter = canvas.style.filter;
+                if (currentFilter.includes('invert')) {
+                    canvas.style.filter = '';
+                    invertBtn.classList.remove('active');
+                } else {
+                    canvas.style.filter = 'invert(.88)';
+                    invertBtn.classList.add('active');
+                }
+            });
+        });
     </script>
 </body>
 </html>
