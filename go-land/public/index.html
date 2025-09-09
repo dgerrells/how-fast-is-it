@@ -29,12 +29,13 @@
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
             background-color: black;
             border: 0px solid #232d3a;
+            transition: filter 280ms ease;
         }
 
     .icon-button {
         position: fixed;
-        bottom: 1.5rem;
-        right: 1.5rem;
+        bottom: 1rem;
+        right: 1rem;
         background-color: #2a2a2a;
         border: 1px solid #3d3d3d;
         border-radius: 50%;
@@ -48,13 +49,13 @@
         z-index: 1000;
         box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
     }
-    .icon-button:active {
-        transform: scale(0.78);
-    }
     .icon-button:hover {
         background-color: #3d3d3d;
         border-color: #555555;
         transform: scale(1.1);
+    }
+    .icon-button:active {
+        transform: scale(0.85);
     }
     .icon-button svg {
         width: 24px;
@@ -71,11 +72,11 @@
     <div>
         <canvas id="canvas"></canvas>
     </div>
-    <div id="invert-btn" class="icon-button">
+    <button id="invert-btn" class="icon-button">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
             <path d="M12 2.25a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V3a.75.75 0 0 1 .75-.75ZM7.5 12a4.5 4.5 0 1 1 9 0 4.5 4.5 0 0 1-9 0ZM18.894 6.166a.75.75 0 0 0-1.06-1.06l-1.591 1.59a.75.75 0 1 0 1.06 1.06l1.59-1.591ZM5.007 17.592a.75.75 0 0 0-1.06-1.06l-1.59 1.59a.75.75 0 0 0 1.06 1.06l1.59-1.591ZM12 18a.75.75 0 0 1 .75.75v2.25a.75.75 0 0 1-1.5 0V18a.75.75 0 0 1 .75-.75ZM18.894 17.592l-1.59-1.591a.75.75 0 0 0-1.06 1.06l1.59 1.591a.75.75 0 0 0 1.06-1.06ZM5.007 6.166a.75.75 0 0 0 1.06-1.06l-1.59-1.591a.75.75 0 0 0-1.06 1.06l1.59 1.591Z" />
         </svg>
-    </div>
+    </button>
 
     <script>
         const OP_CODE_FRAME = 0x01;
@@ -102,7 +103,7 @@
         let isMobile = isLikelyMobile();
 
         const edgeMoveSpeed = isMobile ? 5 : 10;
-        const edgeMoveThreshold = Math.max(isMobile ? 18 : 20, window.innerWidth*0.04);
+        const edgeMoveThreshold = Math.max(isMobile ? 18 : 20, window.innerWidth*0.02);
         let edgeMoveX = width / 2
         let edgeMoveY = height / 2
 
