@@ -74,7 +74,7 @@ var upgrader = websocket.Upgrader{
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const maxClients = 1000
-const particleCount = 2_000_000
+const particleCount = 2_500_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
@@ -90,8 +90,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  3000,
-		height: 3000,
+		width:  2800,
+		height: 2800,
 	}
 )
 
