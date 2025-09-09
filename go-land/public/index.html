@@ -104,7 +104,7 @@
         let isFirstFrame = true;
         let isMobile = isLikelyMobile();
 
-        const edgeMoveSpeed = isMobile ? 5 : 10;
+        const edgeMoveSpeed = isMobile ? 4 : 8;
         const edgeMoveThreshold = Math.max(isMobile ? 18 : 20, window.innerWidth*0.02);
         let edgeMoveX = width / 2
         let edgeMoveY = height / 2
@@ -358,7 +358,7 @@
                 inputY += camDy / 2;
                 sendInput(inputX, inputY, touchDown, camDx, camDy);
             }
-        }, 32)
+        }, 20)
 
         function setupWebGL() {
             gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
