@@ -33,7 +33,7 @@
         #canvas {
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
             background-color: black;
-            border: 0px solid #232d3a;
+            border: 1px solid #232d3a;
             transition: filter 280ms ease;
             width: 100%;
             height: 100%;
@@ -483,7 +483,7 @@
                     canvas.style.filter = '';
                     invertBtn.classList.remove('active');
                 } else {
-                    canvas.style.filter = 'invert(.88)';
+                    canvas.style.filter = 'invert(.95) saturate(1.6)';
                     invertBtn.classList.add('active');
                 }
             };
