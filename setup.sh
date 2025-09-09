@@ -54,6 +54,7 @@ configure_caddy_file() {
     echo "Copying $caddyfile to /etc/caddy/ and restarting Caddy."
     sudo mkdir -p /etc/caddy
     sudo cp "$caddyfile" /etc/caddy/
+    sudo systemctl restart caddy
     sudo systemctl reload caddy
     echo "Caddy service reloaded with new Caddyfile."
 }
