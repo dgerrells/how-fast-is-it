@@ -65,8 +65,6 @@ install_go
 
 install_caddy
 
-configure_caddy_file
-
 install_package ufw
 
 echo "Configuring firewall for Caddy..."
@@ -103,5 +101,8 @@ for service_name in "${services[@]}"; do
     
     echo "Service ${service_name} configured and started."
 done
+
+echo "Configuring Caddy..."
+configure_caddy_file
 
 echo "Server setup completed successfully!"
