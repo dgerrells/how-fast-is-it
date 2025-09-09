@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>How Fast Is Go</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #0d1117;
+            color: #c9d1d9;
+            user-select: none;
+            -webkit-user-select: none; 
+            -moz-user-select: none;
+            cursor: default !important;
+            overflow: hidden;
+        }
+        body > div {
+            overflow: hidden;
+            width: 100%;
+        }
+        #canvas {
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            background-color: black;
+            border: 0px solid #232d3a;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script>
+        const OP_CODE_FRAME = 0x01;
+        const OP_CODE_SIM_DATA = 0x02;
+
+        const canvas = document.getElementById('canvas');
+        const host = window.location.host
+        const ws = new WebSocket(`ws://${host}/ws`);
+
+        let gl, program, texture, quadBuffer;
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        let pixelBuff = new Uint8Array(width * height);
+        let touchDown = false;
+        let isPanning = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+        let lastTouchX = 0;
+        let lastTouchY = 0;
+        let inputX = 0;
+        let inputY = 0;
+        let isFirstFrame = true;
+        let isMobile = isLikelyMobile();
+
+        const edgeMoveSpeed = isMobile ? 5 : 10;
+        const edgeMoveThreshold = Math.max(isMobile ? 18 : 20, window.innerWidth*0.04);
+        let edgeMoveX = width / 2
+        let edgeMoveY = height / 2
+
+        let serverSimData = {
+            camera: {
+                x: 0,
+                y: 0,
+            },
+            simWidth: 0,
+            simHeight: 0,
+        }
+
+        // optimize lookup map
+        const byteToPixels = new Uint8Array(256 * 8);
+        for (let i = 0; i < 256; i++) {
+            for (let bit = 0; bit < 8; bit++) {
+                const pixelValue = ((i >> bit) & 1) ? 255 : 0;
+                byteToPixels[i * 8 + bit] = pixelValue;
+            }
+        }
+
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = function(event) {
+            console.log("WebSocket connection opened.");
+            setupWebGL();
+            resizeCanvas();
+        };
+
+        ws.onmessage = function(event) {
+            const buff = new Uint8Array(event.data);
+            const opCode = buff[0];
+            const data = buff.subarray(1);
+            
+            if (opCode === OP_CODE_FRAME && !isFirstFrame) {
+                unpackBits(data);
+                renderFrame(pixelBuff);
+            } else if (opCode === OP_CODE_SIM_DATA) {
+                const view = new DataView(data.buffer, data.byteOffset);
+                serverSimData.camera.x = view.getInt32(0, true);
+                serverSimData.camera.y = view.getInt32(4, true);
+                serverSimData.simWidth = view.getInt32(8, true);
+                serverSimData.simHeight = view.getInt32(12, true);
+                isFirstFrame = false;
+            }
+        };
+
+        window.addEventListener('resize', resizeCanvas);
+
+        function resizeCanvas() {
+            width = Math.ceil(window.innerWidth / 8) * 8;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            canvas.style.width = `${width}px`;
+            canvas.style.height = `${height}px`;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            pixelBuff = new Uint8Array(width * height);
+            // Request a full frame with the new dimensions
+            sendInput(0, 0, false);
+        }
+
+        function unpackBits(data) {
+            const totalPixels = width * height;
+            let pixelIndex = 0;
+            for (let i = 0; i < data.length; i++) {
+                const byte = data[i];
+                const sourceIndex = byte * 8;
+                for (let j = 0; j < 8; j++) {
+                    if (pixelIndex >= totalPixels) {
+                        return;
+                     }
+                    pixelBuff[pixelIndex++] = byteToPixels[sourceIndex + j];
+                }
+            }
+        }
+
+        function renderFrame(data) {
+            if (!gl) return;
+
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, data);
+            const cameraOffsetLocation = gl.getUniformLocation(program, 'u_cameraOffset');
+            const cameraSizeLocation = gl.getUniformLocation(program, 'u_cameraSize');
+            const simSizeLocation = gl.getUniformLocation(program, 'u_simSize');
+    
+            gl.uniform2f(cameraOffsetLocation, serverSimData.camera.x, serverSimData.camera.y);
+            gl.uniform2f(cameraSizeLocation, width, height);
+            gl.uniform2f(simSizeLocation, serverSimData.simWidth, serverSimData.simHeight);
+
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        ws.onclose = function(event) {
+            console.log("WebSocket connection closed.");
+        };
+
+        ws.onerror = function(error) {
+            console.error("WebSocket error:", error);
+        };
+
+        function sendInput(x, y, isTouchDown, camDx = 0, camDy = 0) {
+            // buffer size is 12 (input) + 16 (camera) = 28 bytes
+            const buffer = new ArrayBuffer(28); 
+            const view = new DataView(buffer);
+            
+            view.setFloat32(0, x, true); 
+            view.setFloat32(4, y, true); 
+            view.setUint8(8, isTouchDown ? 1 : 0, true);
+
+            view.setFloat32(9, -camDx, true);
+            view.setFloat32(13, camDy, true);
+            view.setInt32(17, width, true);
+            view.setInt32(21, height, true);
+
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(buffer);
+            }
+        }
+
+        document.addEventListener('mousedown', (e) => {
+            if (e.button === 0) {
+                touchDown = true;
+                const rect = canvas.getBoundingClientRect();
+                inputX = e.clientX - rect.left;
+                inputY = height - (e.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+            } else if (e.button === 2) {
+                touchDown = false;
+                isPanning = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                e.preventDefault(); 
+            }
+        });
+
+        document.addEventListener('mouseup', (e) => {
+            isPanning = false;
+            touchDown = false;
+            sendInput(0, 0, touchDown);
+        });
+
+        document.addEventListener('mouseleave', (e) => {
+            isPanning = false;
+            touchDown = false;
+            edgeMoveX = width / 2;
+            edgeMoveY = height / 2;
+            sendInput(0, 0, touchDown);
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (touchDown) {
+                const rect = canvas.getBoundingClientRect();
+                inputX = e.clientX - rect.left;
+                inputY = height - (e.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+            } else if (isPanning) {
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+                sendInput(0, 0, false, dx, dy); 
+            }
+
+            edgeMoveX = e.clientX;
+            edgeMoveY = e.clientY;
+        });
+
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        // Touch Events
+        document.addEventListener('touchstart', (e) => {
+            event.preventDefault();
+            if (e.touches.length === 1) {
+                touchDown = true;
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                inputX = touch.clientX - rect.left;
+                inputY = height - (touch.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+                edgeMoveX = touch.clientX;
+                edgeMoveY = touch.clientY;
+            } else if (e.touches.length === 2) {
+                touchDown = false;
+                isPanning = true;
+                lastTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                lastTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+            }
+        }, {
+            passive: false
+        });
+
+        document.addEventListener('touchend', (e) => {
+            touchDown = false;
+            isPanning = false;
+            edgeMoveX = width / 2;
+            edgeMoveY = height / 2;
+            sendInput(0, 0, touchDown);
+        });
+
+        document.addEventListener('touchmove', (e) => {
+            event.preventDefault();
+            if (e.touches.length === 1 && touchDown) {
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches[0];
+                inputX = touch.clientX - rect.left;
+                inputY = height - (touch.clientY - rect.top);
+                sendInput(inputX, inputY, touchDown);
+                edgeMoveX = touch.clientX;
+                edgeMoveY = touch.clientY;
+            } else if (e.touches.length === 2) {
+                const currentTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const currentTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const dx = currentTouchX - lastTouchX;
+                const dy = currentTouchY - lastTouchY;
+                lastTouchX = currentTouchX;
+                lastTouchY = currentTouchY;
+                sendInput(0, 0, false, dx, dy); 
+            }
+        }, {
+            passive: false
+        });
+
+
+        setInterval(() => {
+            if (isPanning || (touchDown && !isMobile)) {
+                return;
+            }
+
+            let camDx = 0;
+            let camDy = 0;
+            if (edgeMoveX < edgeMoveThreshold) {
+                camDx += edgeMoveSpeed;
+            } else if (edgeMoveX > width - edgeMoveThreshold) {
+                camDx -= edgeMoveSpeed;
+            }
+
+            if (edgeMoveY < edgeMoveThreshold) {
+                camDy = edgeMoveSpeed;
+            } else if (edgeMoveY > height - edgeMoveThreshold) {
+                camDy = -edgeMoveSpeed;
+            }
+
+            if (camDx !== 0 || camDy !== 0) {
+                inputX -= camDx / 2;
+                inputY += camDy / 2;
+                sendInput(inputX, inputY, touchDown, camDx, camDy);
+            }
+        }, 32)
+
+        function setupWebGL() {
+            gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
+            if (!gl) {
+                console.error("WebGL not supported, falling back to 2D canvas.");
+                return;
+            }
+
+            const vsSource = `
+                attribute vec2 a_position;
+                attribute vec2 a_texCoord;
+                varying vec2 v_texCoord;
+                void main() {
+                    gl_Position = vec4(a_position, 0.0, 1.0);
+                    v_texCoord = a_texCoord;
+                }
+            `;
+
+            const fsSource = `
+                precision mediump float;
+                varying vec2 v_texCoord;
+                uniform sampler2D u_image;
+
+                uniform vec2 u_cameraOffset;
+                uniform vec2 u_cameraSize;
+                uniform vec2 u_simSize;
+
+                void main() {
+                    float worldX = (v_texCoord.x * u_cameraSize.x) + u_cameraOffset.x;
+                    float worldY = (v_texCoord.y * u_cameraSize.y) + u_cameraOffset.y;
+                    float normX = worldX / u_simSize.x;
+                    float normY = worldY / u_simSize.y;
+                    vec3 color = vec3(normX, normY, 1.0 - normX);
+                    
+                    float mask = texture2D(u_image, v_texCoord).r;
+                    vec3 finalColor = mix(vec3(0), color, mask * 1.2);
+
+                   gl_FragColor = vec4(finalColor, 1.0);
+                }
+            `;
+            
+            function createShader(gl, type, source) {
+                const shader = gl.createShader(type);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                    console.error('An error occurred compiling the shaders: ' + gl.getShaderInfoLog(shader));
+                    gl.deleteShader(shader);
+                    return null;
+                }
+                return shader;
+            }
+
+            const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+            program = gl.createProgram();
+            gl.attachShader(program, vertexShader);
+            gl.attachShader(program, fragmentShader);
+            gl.linkProgram(program);
+
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error('Unable to initialize the shader program: ' + gl.getProgramInfoLog(program));
+                return;
+            }
+
+            gl.useProgram(program);
+
+            quadBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+            const vertices = new Float32Array([
+                -1, -1, 0, 0,  // bottom-left
+                 1, -1, 1, 0,  // bottom-right
+                 1,  1, 1, 1,  // top-right
+                -1, -1, 0, 0,  // bottom-left
+                 1,  1, 1, 1,  // top-right
+                -1,  1, 0, 1   // top-left
+            ]);
+            gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+            const positionLocation = gl.getAttribLocation(program, 'a_position');
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 4 * Float32Array.BYTES_PER_ELEMENT, 0);
+            gl.enableVertexAttribArray(positionLocation);
+
+            const texCoordLocation = gl.getAttribLocation(program, 'a_texCoord');
+            gl.vertexAttribPointer(texCoordLocation, 2, gl.FLOAT, false, 4 * Float32Array.BYTES_PER_ELEMENT, 2 * Float32Array.BYTES_PER_ELEMENT);
+            gl.enableVertexAttribArray(texCoordLocation);
+
+            texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+            const imageLocation = gl.getUniformLocation(program, 'u_image');
+            gl.uniform1i(imageLocation, 0);
+
+            gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+        }
+
+        function isLikelyMobile() {
+            return ('ontouchstart' in window || navigator.maxTouchPoints) || window.innerWidth <= 600;
+        }
+    </script>
+</body>
+</html>

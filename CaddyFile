@@ -1,0 +1,3 @@
+howfastisgo.dev {
+    reverse_proxy localhost:41069
+}
