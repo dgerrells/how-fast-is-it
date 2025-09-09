@@ -5,8 +5,8 @@ After=network.target
 [Service]
 WorkingDirectory=/root/how-fast-is-it/go-land/
 ExecStart=/root/how-fast-is-it/go-land/server
-StandardOutput=append:/var/log/goland-server/out.log
-StandardError=append:/var/log/goland-server/err.log
+StandardOutput=append:/var/log/goland/out.log
+StandardError=append:/var/log/goland/err.log
 Restart=always
 User=root
 Type=simple
