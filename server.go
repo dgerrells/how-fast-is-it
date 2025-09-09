@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"unsafe"
 
-	_ "net/http/pprof"
+	// _ "net/http/pprof"
 	"runtime"
 	"sync"
 	"time"
