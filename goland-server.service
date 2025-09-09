@@ -3,8 +3,8 @@ Description=Gopher Service
 After=network.target
 
 [Service]
-WorkingDirectory=/root/how-fast-is-it/goland/
-ExecStart=/root/how-fast-is-it/goland/server
+WorkingDirectory=/root/how-fast-is-it/go-land/
+ExecStart=/root/how-fast-is-it/go-land/server
 StandardOutput=append:/var/log/goland-server/out.log
 StandardError=append:/var/log/goland-server/err.log
 Restart=always
