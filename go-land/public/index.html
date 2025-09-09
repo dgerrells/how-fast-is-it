@@ -24,25 +24,31 @@
         }
         body > div {
             overflow: hidden;
-            width: 100%;
+            width: 100vw;
+            height: 100vh;
+            padding: 1rem;
+            box-sizing: border-box;
+            border-radius: 0.5rem;
         }
         #canvas {
-            border-radius: 0.5rem;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
             background-color: black;
             border: 0px solid #232d3a;
             transition: filter 280ms ease;
+            width: 100%;
+            height: 100%;
+            border-radius: 0.5rem;
         }
 
     .icon-button {
         position: fixed;
-        bottom: 1rem;
-        right: 1rem;
+        bottom: 1.25rem;
+        right: 1.25rem;
         background-color: #2a2a2a;
         border: 1px solid #3d3d3d;
         border-radius: 50%;
-        width: 32px;
-        height: 32px;
+        width: 28px;
+        height: 28px;
         display: flex;
         justify-content: center;
         align-items: center;
@@ -105,7 +111,7 @@
         let isMobile = isLikelyMobile();
 
         const edgeMoveSpeed = isMobile ? 4 : 8;
-        const edgeMoveThreshold = Math.max(isMobile ? 18 : 20, window.innerWidth*0.02);
+        const edgeMoveThreshold = Math.max(isMobile ? 18 : 22, window.innerHeight*0.02);
         let edgeMoveX = width / 2
         let edgeMoveY = height / 2
 
@@ -156,12 +162,13 @@
         window.addEventListener('resize', resizeCanvas);
 
         function resizeCanvas() {
-            width = Math.ceil(window.innerWidth / 8) * 8;
-            height = window.innerHeight;
+            const rect = canvas.getBoundingClientRect();
+            width = Math.ceil(rect.width / 8) * 8;
+            height = rect.height;
             canvas.width = width;
             canvas.height = height;
-            canvas.style.width = `${width}px`;
-            canvas.style.height = `${height}px`;
+            // canvas.style.width = `${width}px`;
+            // canvas.style.height = `${height}px`;
             gl.viewport(0, 0, canvas.width, canvas.height);
             pixelBuff = new Uint8Array(width * height);
             // Request a full frame with the new dimensions
@@ -335,7 +342,7 @@
 
 
         setInterval(() => {
-            if (isPanning || (touchDown && !isMobile)) {
+            if (isPanning) {
                 return;
             }
 
@@ -343,19 +350,19 @@
             let camDy = 0;
             if (edgeMoveX < edgeMoveThreshold) {
                 camDx += edgeMoveSpeed;
-            } else if (edgeMoveX > width - edgeMoveThreshold) {
+            } else if (edgeMoveX > window.innerWidth - edgeMoveThreshold) {
                 camDx -= edgeMoveSpeed;
             }
 
             if (edgeMoveY < edgeMoveThreshold) {
                 camDy = edgeMoveSpeed;
-            } else if (edgeMoveY > height - edgeMoveThreshold) {
+            } else if (edgeMoveY > window.innerHeight - edgeMoveThreshold) {
                 camDy = -edgeMoveSpeed;
             }
 
             if (camDx !== 0 || camDy !== 0) {
-                inputX -= camDx / 2;
-                inputY += camDy / 2;
+                // inputX = serverSimData.camera.x + lastMouseX
+                // inputY += camDy;
                 sendInput(inputX, inputY, touchDown, camDx, camDy);
             }
         }, 20)
