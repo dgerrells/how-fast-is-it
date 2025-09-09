@@ -43,8 +43,9 @@
         const OP_CODE_SIM_DATA = 0x02;
 
         const canvas = document.getElementById('canvas');
-        const host = window.location.host
-        const ws = new WebSocket(`ws://${host}/ws`);
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const host = window.location.host;
+        const ws = new WebSocket(`${protocol}//${host}/ws`);
 
         let gl, program, texture, quadBuffer;
         let width = window.innerWidth;
