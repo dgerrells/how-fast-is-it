@@ -73,7 +73,6 @@ var upgrader = websocket.Upgrader{
 // var clientSendChannels [maxClients]chan []byte
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
-const numBuffers = 3
 const maxClients = 1000
 const particleCount = 2_000_000
 
