@@ -55,7 +55,7 @@ configure_caddy_file() {
     sudo mkdir -p /etc/caddy
     sudo cp "$caddyfile" /etc/caddy/
     echo "Setting Caddy permissions to bind to low ports..."
-    sudo setcap cap_net_bind_service=+ep $(which caddy)
+    sudo setcap cap_net_bind_service=+ep /usr/bin/caddy
     echo "Caddy permissions configured."
     sudo systemctl restart caddy
     echo "Caddy service reloaded with new Caddyfile."
