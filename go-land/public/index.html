@@ -93,7 +93,7 @@
         const canvas = document.getElementById('canvas');
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const host = window.location.host;
-        const ws = new WebSocket(`${protocol}//${host}/ws`);
+        let ws;
 
         let gl, program, texture, quadBuffer;
         let width = window.innerWidth;
@@ -110,10 +110,13 @@
         let isFirstFrame = true;
         let isMobile = isLikelyMobile();
 
-        const edgeMoveSpeed = isMobile ? 4 : 8;
+        const edgeMoveSpeed = isMobile ? 5 : 8;
         const edgeMoveThreshold = Math.max(isMobile ? 18 : 22, window.innerHeight*0.02);
         let edgeMoveX = width / 2
         let edgeMoveY = height / 2
+
+        let reconnectTimeout;
+        const RECONNECT_DELAY = 3000;
 
         let serverSimData = {
             camera: {
@@ -124,7 +127,7 @@
             simHeight: 0,
         }
 
-        // optimize lookup map
+        // optimized lookup map
         const byteToPixels = new Uint8Array(256 * 8);
         for (let i = 0; i < 256; i++) {
             for (let bit = 0; bit < 8; bit++) {
@@ -133,46 +136,50 @@
             }
         }
 
-        ws.binaryType = 'arraybuffer';
+        // kick it off
+        connectWebSocket();
 
-        ws.onopen = function(event) {
-            console.log("WebSocket connection opened.");
-            setupWebGL();
-            resizeCanvas();
-        };
-
-        ws.onmessage = function(event) {
-            const buff = new Uint8Array(event.data);
-            const opCode = buff[0];
-            const data = buff.subarray(1);
-            
-            if (opCode === OP_CODE_FRAME && !isFirstFrame) {
-                unpackBits(data);
-                renderFrame(pixelBuff);
-            } else if (opCode === OP_CODE_SIM_DATA) {
-                const view = new DataView(data.buffer, data.byteOffset);
-                serverSimData.camera.x = view.getInt32(0, true);
-                serverSimData.camera.y = view.getInt32(4, true);
-                serverSimData.simWidth = view.getInt32(8, true);
-                serverSimData.simHeight = view.getInt32(12, true);
-                isFirstFrame = false;
+        function connectWebSocket() {
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                console.log("WebSocket is already connected or connecting.");
+                return;
             }
-        };
+            
+            ws = new WebSocket(`${protocol}//${host}/ws`);
+            ws.binaryType = 'arraybuffer';
 
-        window.addEventListener('resize', resizeCanvas);
+            ws.onopen = function(event) {
+                setupWebGL();
+                resizeCanvas();
+            };
 
-        function resizeCanvas() {
-            const rect = canvas.getBoundingClientRect();
-            width = Math.ceil(rect.width / 8) * 8;
-            height = rect.height;
-            canvas.width = width;
-            canvas.height = height;
-            // canvas.style.width = `${width}px`;
-            // canvas.style.height = `${height}px`;
-            gl.viewport(0, 0, canvas.width, canvas.height);
-            pixelBuff = new Uint8Array(width * height);
-            // Request a full frame with the new dimensions
-            sendInput(0, 0, false);
+            ws.onmessage = function(event) {
+                const buff = new Uint8Array(event.data);
+                const opCode = buff[0];
+                const data = buff.subarray(1);
+                
+                if (opCode === OP_CODE_FRAME && !isFirstFrame) {
+                    unpackBits(data);
+                    renderFrame(pixelBuff);
+                } else if (opCode === OP_CODE_SIM_DATA) {
+                    const view = new DataView(data.buffer, data.byteOffset);
+                    serverSimData.camera.x = view.getInt32(0, true);
+                    serverSimData.camera.y = view.getInt32(4, true);
+                    serverSimData.simWidth = view.getInt32(8, true);
+                    serverSimData.simHeight = view.getInt32(12, true);
+                    isFirstFrame = false;
+                }
+            };
+
+            ws.onclose = function(event) {
+                if (document.visibilityState === 'visible') {
+                    scheduleReconnect();
+                }
+            };
+
+            ws.onerror = function(error) {
+                ws.close();
+            };
         }
 
         function unpackBits(data) {
@@ -210,14 +217,6 @@
             gl.drawArrays(gl.TRIANGLES, 0, 6);
         }
 
-        ws.onclose = function(event) {
-            console.log("WebSocket connection closed.");
-        };
-
-        ws.onerror = function(error) {
-            console.error("WebSocket error:", error);
-        };
-
         function sendInput(x, y, isTouchDown, camDx = 0, camDy = 0) {
             // buffer size is 12 (input) + 16 (camera) = 28 bytes
             const buffer = new ArrayBuffer(28); 
@@ -236,6 +235,29 @@
                 ws.send(buffer);
             }
         }
+
+        function scheduleReconnect() {
+            if (!reconnectTimeout && ws?.readyState !== WebSocket.OPEN) {
+                reconnectTimeout = setTimeout(() => {
+                    connectWebSocket();
+                    reconnectTimeout = null;
+                }, RECONNECT_DELAY);
+            }
+        }
+
+        window.addEventListener('focus', () => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                connectWebSocket();
+            }
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                if (!ws || ws.readyState !== WebSocket.OPEN) {
+                    connectWebSocket();
+                }
+            }
+        });
 
         document.addEventListener('mousedown', (e) => {
             if (e.button === 0) {
@@ -340,7 +362,6 @@
             passive: false
         });
 
-
         setInterval(() => {
             if (isPanning) {
                 return;
@@ -366,6 +387,23 @@
                 sendInput(inputX, inputY, touchDown, camDx, camDy);
             }
         }, 20)
+
+
+        window.addEventListener('resize', resizeCanvas);
+
+        function resizeCanvas() {
+            const rect = canvas.getBoundingClientRect();
+            width = Math.ceil(rect.width / 8) * 8;
+            height = rect.height;
+            canvas.width = width;
+            canvas.height = height;
+            // canvas.style.width = `${width}px`;
+            // canvas.style.height = `${height}px`;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            pixelBuff = new Uint8Array(width * height);
+            // Request a full frame with the new dimensions
+            sendInput(0, 0, false);
+        }
 
         function setupWebGL() {
             gl = canvas.getContext('webgl', { preserveDrawingBuffer: false });
@@ -471,7 +509,6 @@
         function isLikelyMobile() {
             return ('ontouchstart' in window || navigator.maxTouchPoints) || window.innerWidth <= 600;
         }
-
 
         document.addEventListener('DOMContentLoaded', () => {
             const canvas = document.getElementById('canvas');

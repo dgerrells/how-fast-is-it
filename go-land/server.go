@@ -96,6 +96,8 @@ var (
 )
 
 func startSim() {
+	var resetInterval uint64 = (60 * 60 * 5)
+
 	framePool := sync.Pool{
 		New: func() interface{} {
 			return &Frame{
@@ -138,6 +140,14 @@ func startSim() {
 		if frameCount%30 == 0 {
 			log.Println(simState.dt)
 			log.Println(fmt.Sprintf("FPS: %f", 1/simState.dt))
+		}
+
+		if frameCount%resetInterval == 0 {
+			for i := 0; i < particleCount; i++ {
+				var p = &particles[i]
+				p.x = rand.Float32() * float32(simState.width)
+				p.y = rand.Float32() * float32(simState.height)
+			}
 		}
 
 		wg.Add(numThreads)
@@ -407,7 +417,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 		var fSimWidth = float32(job.simState.width)
 		var fSimHeight = float32(job.simState.height)
 		var gravPower = job.simState.dt * 18
-		var pullDist float32 = 34000
+		var pullDist float32 = 36000
 
 		for i := job.startIndex; i < job.endIndex; i++ {
 			p := &particles[i]
