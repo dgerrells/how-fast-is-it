@@ -175,14 +175,14 @@ func startSim() {
 		// wait for them to complete
 		wg.Wait()
 
-		// if frameCount%2 == 0 {
-		select {
-		case framesChannel <- frame:
-		default:
-			log.Print("too slow")
-			framePool.Put(frame)
+		if frameCount%2 == 0 {
+			select {
+			case framesChannel <- frame:
+			default:
+				log.Print("too slow")
+				framePool.Put(frame)
+			}
 		}
-		// }
 	}
 }
 
@@ -446,14 +446,14 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 				p.dy *= -1
 			}
 
-			// if frameCount%2 == 0 {
-			if p.x >= 0 && p.x < fSimWidth && p.y >= 0 && p.y < fSimHeight {
-				x := uint32(p.x)
-				y := uint32(p.y)
-				idx := (y*simState.width + x)
-				frame[idx] = 1
+			if frameCount%2 == 0 {
+				if p.x >= 0 && p.x < fSimWidth && p.y >= 0 && p.y < fSimHeight {
+					x := uint32(p.x)
+					y := uint32(p.y)
+					idx := (y*simState.width + x)
+					frame[idx] = 1
+				}
 			}
-			// }
 
 		}
 		wg.Done()
