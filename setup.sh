@@ -40,6 +40,7 @@ install_caddy() {
         sudo apt update
         sudo apt install -y caddy
         echo "Caddy installed successfully."
+        sudo systemctl disable caddy --now 
     else
         echo "Caddy is already installed."
     fi

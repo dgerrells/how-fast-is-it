@@ -313,7 +313,6 @@ func init() {
 			} else {
 				byteSlice[bit] = 0
 			}
-			// byteSlice[bit] = packedByte
 		}
 		uint64ToByteLUT[BytesToUint64Unsafe(byteSlice)] = byte(i)
 	}
@@ -416,7 +415,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 		}
 		var fSimWidth = float32(job.simState.width)
 		var fSimHeight = float32(job.simState.height)
-		var gravPower = job.simState.dt * 18
+		var gravPower = job.simState.dt * 6
 		var pullDist float32 = 36000
 
 		for i := job.startIndex; i < job.endIndex; i++ {
@@ -427,7 +426,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 				diry := input.Y - p.y
 				dist := dirx*dirx + diry*diry
 				if dist < pullDist && dist > 1 {
-					var grav = 1 / float32(math.Sqrt(float64(dist)))
+					var grav = 3 / float32(math.Sqrt(float64(dist)))
 					p.dx += dirx * gravPower * grav
 					p.dy += diry * gravPower * grav
 				}
