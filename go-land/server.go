@@ -3,19 +3,18 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
 	"net/http"
-	"unsafe"
-
-	// _ "net/http/pprof"
 	"runtime"
 	"sync"
 	"time"
+	"unsafe"
 
-	"github.com/gorilla/websocket"
+	"github.com/pion/webrtc/v3"
 )
 
 type Particle struct {
@@ -62,17 +61,6 @@ const (
 	OpCodeSimData byte = 0x02
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
-// var clientSendChannels [maxClients]chan []byte
-var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
-
 const maxClients = 1000
 const particleCount = 2_500_000
 
@@ -82,17 +70,20 @@ var particlesPerThread = particleCount / numThreads
 const friction = 0.988
 
 var (
-	clients    []*websocket.Conn
-	clientsMu  sync.Mutex
-	frameCount uint64
-	inputs     [maxClients]Input
-	cameras    [maxClients]ClientCam
-	particles  = []Particle{}
-	simState   = SimState{
+	api               *webrtc.API
+	peerConnections   []*webrtc.PeerConnection
+	peerConnectionsMu sync.Mutex
+	// Updated map for the output data channel
+	outputDataChannels = make(map[*webrtc.PeerConnection]*webrtc.DataChannel)
+	inputs             [maxClients]Input
+	cameras            [maxClients]ClientCam
+	particles          = []Particle{}
+	simState           = SimState{
 		dt:     1.0 / 60.0,
 		width:  2800,
 		height: 2800,
 	}
+	frameCount uint64
 )
 
 func startSim() {
@@ -107,7 +98,6 @@ func startSim() {
 	}
 	framesChannel := make(chan *Frame, 3)
 
-	// gen particles
 	for i := 0; i < particleCount; i++ {
 		particles = append(particles, Particle{
 			x:  rand.Float32() * float32(simState.width),
@@ -117,12 +107,10 @@ func startSim() {
 		})
 	}
 
-	// setup ticker
 	ticker := time.NewTicker(time.Second / 60)
 	defer ticker.Stop()
 	lastTime := time.Now()
 
-	// wait group
 	jobs := make(chan SimJob, numThreads)
 	var wg sync.WaitGroup
 	for i := 0; i < numThreads; i++ {
@@ -151,12 +139,10 @@ func startSim() {
 		}
 
 		wg.Add(numThreads)
-		// we are ok if this is out of sync a little as it means
-		// it only checks more data than it needs to. We could check ALL inputs
-		// but we want to maybe support 10k inputs so better to only check what is connected.
-		numClients := len(clients)
+		peerConnectionsMu.Lock()
+		numClients := len(peerConnections)
+		peerConnectionsMu.Unlock()
 
-		// frame
 		frame := framePool.Get().(*Frame)
 		framebuffer := frame.data
 		for i := range framebuffer {
@@ -172,7 +158,6 @@ func startSim() {
 			jobs <- SimJob{startIndex, endIndex, simState, &inputs, numClients, &framebuffer}
 		}
 
-		// wait for them to complete
 		wg.Wait()
 
 		if frameCount%2 == 0 {
@@ -186,120 +171,173 @@ func startSim() {
 	}
 }
 
-func wsHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+type OfferRequest struct {
+	SDP webrtc.SessionDescription `json:"sdp"`
+}
+
+type AnswerResponse struct {
+	SDP *webrtc.SessionDescription `json:"sdp"`
+}
+
+func webrtcHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var offerReq OfferRequest
+	if err := json.NewDecoder(r.Body).Decode(&offerReq); err != nil {
+		http.Error(w, "Invalid offer payload", http.StatusBadRequest)
+		return
+	}
+
+	peerConnection, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
-		log.Println("Upgrade failed:", err)
+		log.Printf("Error creating peer connection: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	clientsMu.Lock()
-	if len(clients) >= maxClients {
-		clientsMu.Unlock()
-		log.Println("Max clients reached")
-		conn.Close()
+	// --- NEW: Create a data channel for sending frames to the client ---
+	frameDataChannel, err := peerConnection.CreateDataChannel("frame-data", nil)
+	if err != nil {
+		log.Printf("Error creating data channel: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	clients = append(clients, conn)
-	clientSendChannelMap[conn] = make(chan []byte, 2)
 
-	clientsMu.Unlock()
+	frameDataChannel.OnOpen(func() {
+		log.Printf("Frame Data Channel opened for peer connection %p", peerConnection)
+		peerConnectionsMu.Lock()
+		outputDataChannels[peerConnection] = frameDataChannel
+		peerConnectionsMu.Unlock()
+	})
 
-	log.Printf("Client connected\n")
+	frameDataChannel.OnClose(func() {
+		log.Printf("Frame Data Channel closed for peer connection %p", peerConnection)
+		peerConnectionsMu.Lock()
+		delete(outputDataChannels, peerConnection)
+		peerConnectionsMu.Unlock()
+	})
+	// --- END NEW ---
 
-	go writePump(conn)
+	// Handle incoming data channels (e.g., input from client)
+	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
+		log.Printf("New DataChannel %s", d.Label())
+		if d.Label() == "input-data" {
+			d.OnMessage(func(msg webrtc.DataChannelMessage) {
+				reader := bytes.NewReader(msg.Data)
+				var touchInput Input
+				var camInput ClientCam
 
-	defer func() {
-		clientsMu.Lock()
-		for i, c := range clients {
-			if c == conn {
-				clients = append(clients[:i], clients[i+1:]...)
-				inputs[i] = Input{}
-				cameras[i] = ClientCam{}
-				cameras[i].X = float32(simState.width)/2 - 300
-				cameras[i].Y = float32(simState.height)/2 - 300
-				cameras[i].Width = 1
-				cameras[i].Height = 1
-				break
-			}
+				errInput := binary.Read(reader, binary.LittleEndian, &touchInput)
+				if errInput != nil {
+					log.Println("Binary read failed input:", errInput)
+					return
+				}
+				errCam := binary.Read(reader, binary.LittleEndian, &camInput)
+				if errCam != nil {
+					log.Println("Binary read failed cam:", errCam)
+					return
+				}
+
+				idx := findPeerConnectionIndex(peerConnection)
+				if idx != -1 && idx < maxClients {
+					cameras[idx].Width = camInput.Width
+					cameras[idx].Height = camInput.Height
+					cameras[idx].X += camInput.X
+					cameras[idx].Y += camInput.Y
+					inputs[idx] = touchInput
+					inputs[idx].X += cameras[idx].X
+					inputs[idx].Y += cameras[idx].Y
+
+					var cam = &cameras[idx]
+					x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
+
+					maxCamX := int32(simState.width) - width
+					if x < 0 {
+						x = 0
+						cam.X = 0
+					} else if x > maxCamX {
+						x = maxCamX
+						cam.X = float32(maxCamX)
+					}
+
+					maxCamY := int32(simState.height) - height
+					if y < 0 {
+						y = 0
+						cam.Y = 0
+					} else if y > maxCamY {
+						y = maxCamY
+						cam.Y = float32(maxCamY)
+					}
+
+					if x+width > int32(simState.width) {
+						width = int32(simState.width) - x
+						cam.Width = width
+					}
+					if y+height > int32(simState.height) {
+						height = int32(simState.height) - y
+						cam.Height = height
+					}
+				}
+			})
+
+			d.OnClose(func() {
+				log.Printf("Input DataChannel closed for peer connection %p", peerConnection)
+				peerConnectionsMu.Lock()
+				idx := findPeerConnectionIndex(peerConnection)
+				if idx != -1 {
+					peerConnections = append(peerConnections[:idx], peerConnections[idx+1:]...)
+					inputs[idx] = Input{}
+					cameras[idx] = ClientCam{}
+					cameras[idx].X = float32(simState.width)/2 - 300
+					cameras[idx].Y = float32(simState.height)/2 - 300
+					cameras[idx].Width = 1
+					cameras[idx].Height = 1
+				}
+				peerConnectionsMu.Unlock()
+				peerConnection.Close()
+			})
 		}
-		clientsMu.Unlock()
-		close(clientSendChannelMap[conn])
-		delete(clientSendChannelMap, conn)
-		conn.Close()
-		log.Printf("Client disconnected\n")
-	}()
+	})
 
-	for {
-		mt, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("Read failed:", err)
-			return
-		}
-		if mt == websocket.BinaryMessage {
-			reader := bytes.NewReader(message)
-			var touchInput Input
-			// interpret x and y as offsets.
-			var camInput ClientCam
-			// read input
-			errInput := binary.Read(reader, binary.LittleEndian, &touchInput)
-			if errInput != nil {
-				log.Println("Binary read failed input:", errInput)
-				continue
-			}
-			// read cam input
-			errCam := binary.Read(reader, binary.LittleEndian, &camInput)
-			if errCam != nil {
-				log.Println("Binary read failed cam:", errCam)
-				continue
-			}
-
-			// maybe later we lock or figure out way to not need as lock in a hot path
-			// this is fine as only chance of bad data is if someone connect or drops whilst updating input
-			idx := findClientIndex(conn)
-			if idx != -1 && idx < maxClients {
-
-				cameras[idx].Width = camInput.Width
-				cameras[idx].Height = camInput.Height
-				cameras[idx].X += camInput.X
-				cameras[idx].Y += camInput.Y
-				inputs[idx] = touchInput
-				inputs[idx].X += cameras[idx].X
-				inputs[idx].Y += cameras[idx].Y
-
-				// clamp to valid camera range
-				var cam = &cameras[idx]
-				x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
-
-				maxCamX := int32(simState.width) - width
-				if x < 0 {
-					x = 0
-					cam.X = 0
-				} else if x > maxCamX {
-					x = maxCamX
-					cam.X = float32(maxCamX)
-				}
-
-				maxCamY := int32(simState.height) - height
-				if y < 0 {
-					y = 0
-					cam.Y = 0
-				} else if y > maxCamY {
-					y = maxCamY
-					cam.Y = float32(maxCamY)
-				}
-
-				if x+width > int32(simState.width) {
-					width = int32(simState.width) - x
-					cam.Width = width
-				}
-				if y+height > int32(simState.height) {
-					height = int32(simState.height) - y
-					cam.Height = height
-				}
-			}
-		}
+	if err := peerConnection.SetRemoteDescription(offerReq.SDP); err != nil {
+		log.Printf("Error setting remote description: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
 	}
+
+	answer, err := peerConnection.CreateAnswer(nil)
+	if err != nil {
+		log.Printf("Error creating answer: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+	if err := peerConnection.SetLocalDescription(answer); err != nil {
+		log.Printf("Error setting local description: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	<-gatherComplete
+	if peerConnection.LocalDescription() == nil {
+		http.Error(w, "Local description is nil", http.StatusInternalServerError)
+		return
+	}
+
+	peerConnectionsMu.Lock()
+	peerConnections = append(peerConnections, peerConnection)
+	peerConnectionsMu.Unlock()
+
+	response := AnswerResponse{SDP: peerConnection.LocalDescription()}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error encoding answer: %v", err)
+	}
+	log.Printf("WebRTC client connected")
 }
 
 var uint64ToByteLUT = make(map[uint64]byte)
@@ -326,18 +364,28 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 	for {
 		frame := <-ch
 		frameBuffer := frame.data
+		currentFrameID := uint32(frameCount)
 
-		clientsMu.Lock()
-		for i, conn := range clients {
-			cam := &cameras[i]
-			var x, y, width, height = int32(cam.X), int32(cam.Y), cam.Width, cam.Height
-			var isValidCamSize = width < int32(simState.width) && height < int32(simState.height) && width > 0 && height > 0
+		peerConnectionsMu.Lock()
+		for pc, dc := range outputDataChannels {
+			if dc.ReadyState() != webrtc.DataChannelStateOpen {
+				continue
+			}
+			idx := findPeerConnectionIndex(pc)
+			if idx == -1 {
+				continue
+			}
+			cam := &cameras[idx]
+
+			x, y, width, height := int32(cam.X), int32(cam.Y), cam.Width, cam.Height
+			isValidCamSize := width < int32(simState.width) && height < int32(simState.height) && width > 0 && height > 0
 
 			if isValidCamSize {
-				dataToSendSize := (width*height+7)/8 + 1
-				dataToSend := make([]byte, dataToSendSize)
-				dataToSend[0] = OpCodeFrame
-				outputByteIndex := int32(1)
+				const maxPayloadSize int32 = 65000
+
+				// Pack the frame data into a temporary buffer first
+				packedFrameBuf := new(bytes.Buffer)
+				packedFrameBuf.Grow(int((width*height + 7) / 8))
 
 				for row := int32(0); row < height; row++ {
 					yOffset := (y + row) * int32(simState.width)
@@ -345,58 +393,64 @@ func broadcastFrames(ch <-chan *Frame, pool *sync.Pool) {
 						fullBufferIndex := yOffset + (x + col)
 						chunk := frameBuffer[fullBufferIndex : fullBufferIndex+8]
 						key := BytesToUint64Unsafe(chunk)
-
-						packedByte, _ := uint64ToByteLUT[key]
-
-						if outputByteIndex < int32(len(dataToSend)) {
-							dataToSend[outputByteIndex] = packedByte
-							outputByteIndex++
+						packedByte, ok := uint64ToByteLUT[key]
+						if !ok {
+							packedByte = 0
 						}
+						packedFrameBuf.WriteByte(packedByte)
 					}
 				}
 
-				select {
-				case clientSendChannelMap[conn] <- dataToSend:
-				default:
-					log.Printf("Client %d's channel is full, dropping frame.", i)
+				dataToSend := packedFrameBuf.Bytes()
+				totalSize := int32(len(dataToSend))
+				var sentBytes int32 = 0
+				var chunkIndex byte = 0
+
+				// The payload now includes the opcode, frame ID, and chunk index
+				payloadSize := maxPayloadSize - 6 // 1 byte for OpCode, 4 for frame ID, 1 for chunk index
+
+				for sentBytes < totalSize {
+					end := sentBytes + payloadSize
+					if end > totalSize {
+						end = totalSize
+					}
+
+					chunkData := dataToSend[sentBytes:end]
+
+					fragmentedData := new(bytes.Buffer)
+					fragmentedData.WriteByte(OpCodeFrame)
+					binary.Write(fragmentedData, binary.LittleEndian, currentFrameID)
+					fragmentedData.WriteByte(chunkIndex)
+					fragmentedData.Write(chunkData)
+
+					if err := dc.Send(fragmentedData.Bytes()); err != nil {
+						log.Printf("Error sending data chunk on data channel: %v", err)
+					}
+
+					sentBytes = end
+					chunkIndex++
 				}
 			}
 
+			// The code for sending `OpCodeSimData` is independent and can remain as is.
 			camMessage := new(bytes.Buffer)
 			camMessage.WriteByte(OpCodeSimData)
 			binary.Write(camMessage, binary.LittleEndian, x)
 			binary.Write(camMessage, binary.LittleEndian, y)
 			binary.Write(camMessage, binary.LittleEndian, simState.width)
 			binary.Write(camMessage, binary.LittleEndian, simState.height)
-			select {
-			case clientSendChannelMap[conn] <- camMessage.Bytes():
-			default:
-				log.Printf("Client %d's camera channel is full, dropping frame.", i)
+			if err := dc.Send(camMessage.Bytes()); err != nil {
+				log.Printf("Error sending camera data on data channel: %v", err)
 			}
 		}
-		clientsMu.Unlock()
+		peerConnectionsMu.Unlock()
 		pool.Put(frame)
 	}
 }
 
-func writePump(conn *websocket.Conn) {
-	var channel = clientSendChannelMap[conn]
-	for {
-		message, ok := <-channel
-		if !ok {
-			return
-		}
-
-		if err := conn.WriteMessage(websocket.BinaryMessage, message); err != nil {
-			log.Printf("Write to client failed: %v", err)
-			return
-		}
-	}
-}
-
-func findClientIndex(conn *websocket.Conn) int {
-	for i, c := range clients {
-		if c == conn {
+func findPeerConnectionIndex(pc *webrtc.PeerConnection) int {
+	for i, p := range peerConnections {
+		if p == pc {
 			return i
 		}
 	}
@@ -416,7 +470,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 		var fSimWidth = float32(job.simState.width)
 		var fSimHeight = float32(job.simState.height)
 		var gravPower = job.simState.dt * 6
-		var pullDist float32 = 36000
+		var pullDist float32 = 936000
 
 		for i := job.startIndex; i < job.endIndex; i++ {
 			p := &particles[i]
@@ -451,28 +505,31 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 					x := uint32(p.x)
 					y := uint32(p.y)
 					idx := (y*simState.width + x)
-					frame[idx] = 1
+					if idx < uint32(len(frame)) {
+						frame[idx] = 1
+					}
 				}
 			}
-
 		}
 		wg.Done()
 	}
 }
 
 func main() {
-	go startSim()
-	http.HandleFunc("/ws", wsHandler)
-	http.Handle("/", http.FileServer(http.Dir("./public")))
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterDefaultCodecs(); err != nil {
+		log.Fatalf("Failed to register default codecs: %v", err)
+	}
 
-	// go func() {
-	// 	log.Println(http.ListenAndServe("localhost:6061", nil))
-	// }()
+	api = webrtc.NewAPI(webrtc.WithMediaEngine(m))
+
+	go startSim()
+	http.HandleFunc("/webrtc", webrtcHandler)
+	http.Handle("/", http.FileServer(http.Dir("./public")))
 
 	var port = 41069
 	log.Println(fmt.Sprintf("Server started on :%d", port))
 	if err := http.ListenAndServe(fmt.Sprintf(":%d", port), nil); err != nil {
 		log.Fatal("ListenAndServe:", err)
 	}
-
 }
