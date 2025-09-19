@@ -31,6 +31,20 @@ install_go() {
     fi
 }
 
+install_bun() {
+    if ! command -v bun &> /dev/null; then
+        echo "Bun not found. Installing..."
+        curl -fsSL https://bun.sh/install | bash
+        echo "Bun installed successfully."
+    else
+        echo "Bun is already installed."
+    fi
+
+    echo "Running bun install in the js-land directory..."
+    (cd js-land && bun install)
+    echo "bun install completed."
+}
+
 install_caddy() {
     if ! command -v caddy &> /dev/null; then
         echo "Caddy not found. Installing..."
@@ -63,6 +77,8 @@ echo "Starting server setup for Go and Caddy..."
 
 install_go
 
+install_bun
+
 install_caddy
 
 install_package ufw
@@ -79,7 +95,7 @@ sudo ufw status verbose
 
 echo "Setting up and starting systemd services..."
 
-declare -a services=("goland")
+declare -a services=("goland" "jsland")
 
 for service_name in "${services[@]}"; do
     service_file="${service_name}-server.service"

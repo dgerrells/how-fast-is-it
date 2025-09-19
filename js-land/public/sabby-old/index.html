@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en" style="user-select: none">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sabby</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/UAParser.js/1.0.37/ua-parser.min.js"></script>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.162.0/build/three.module.js"
+        }
+      }
+    </script>
+    <style>
+      body,
+      html,
+      canvas {
+        touch-action: none;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -khtml-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+        user-select: none;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body
+    style="
+      margin: 0;
+      width: 100vw;
+      height: 100vh;
+      background: black;
+      pointer-events: none;
+      overflow: hidden;
+      user-select: none;
+    "
+  >
+    <script type="module">
+      import * as THREE from "three";
+      const uap = new UAParser();
+
+      const getQueryParam = (paramName) =>
+        new URL(window.location.href).searchParams.get(paramName);
+      let cores = ~~getQueryParam("cores");
+      if (cores === 0) {
+        cores =
+          uap.getResult().device.vendor === "Apple"
+            ? 4
+            : navigator.hardwareConcurrency - 1;
+      }
+
+      const PARTICLE_COUNT = ~~getQueryParam("count") || 1_000_000;
+      const WORKER_COUNT = cores;
+      const WORKER_CHUNK_SIZE = Math.floor(PARTICLE_COUNT / WORKER_COUNT);
+      const simData = {
+        workerPool: [],
+        activeWorkers: 0,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        particleGridA: null,
+        particleGridB: null,
+        activeParticleGrid: null,
+        scene: new THREE.Scene(),
+        camera: new THREE.OrthographicCamera(
+          window.innerWidth / -2,
+          window.innerWidth / 2,
+          window.innerHeight / 2,
+          window.innerHeight / -2,
+          0.1,
+          100
+        ),
+        renderer: new THREE.WebGLRenderer(),
+        texture: null,
+        quad: null,
+      };
+
+      const particleStride = 4; // 6 floats x,y,dx,dy,sx,sy;
+      const particleByteStride = particleStride * 4; // 4 bytes per float
+      const sabViewParticles = new Float32Array(
+        new SharedArrayBuffer(PARTICLE_COUNT * particleByteStride)
+      );
+      // dt + screen width + screen height + touch count + mouse x + mouse y
+      const sabViewSimData = new Float32Array(new SharedArrayBuffer(4 * 64));
+
+      simData.camera.position.set(simData.width / 2, simData.height / 2, 1);
+      simData.renderer.setSize(simData.width, simData.height);
+      document.body.appendChild(simData.renderer.domElement);
+
+      simData.texture = new THREE.DataTexture(
+        new Uint8Array(simData.width * simData.height),
+        simData.width,
+        simData.height,
+        THREE.RedFormat,
+        THREE.UnsignedByteType,
+        THREE.UVMapping,
+        THREE.ClampToEdge,
+        THREE.ClampToEdge,
+        THREE.NearestFilter,
+        THREE.NearestFilter,
+        0
+      );
+
+      const customMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          screen: { value: new THREE.Vector2(simData.width, simData.height) },
+          uTexture: { value: simData.texture },
+        },
+        vertexShader: `
+              varying vec2 vUv;
+              
+              void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+              }
+          `,
+        fragmentShader: `
+              uniform sampler2D uTexture;
+              uniform vec2 screen;
+              varying vec2 vUv;
+
+              void main() {
+                float count = texture2D(uTexture, vUv).x;
+                vec4 col = vec4(0,0,0,1);
+                col.x = count * (10. + 20.*gl_FragCoord.x / screen.x);
+                col.y = count * (10. + 20.*gl_FragCoord.y / screen.y);
+                col.z = count * (10. + 20.*(1.-gl_FragCoord.y / screen.y));
+                gl_FragColor = col;
+              }
+          `,
+        blending: THREE.AdditiveBlending,
+        depthTest: false,
+      });
+
+      //setup workers
+      simData.activeWorkers = WORKER_COUNT;
+      for (let i = 0; i < WORKER_COUNT; i++) {
+        const worker = new Worker("/sabby-old/worker.js");
+        worker.addEventListener("message", onWorkerMessage);
+        simData.workerPool.push(worker);
+      }
+
+      //init particles
+      for (let i = 0; i < PARTICLE_COUNT; i++) {
+        sabViewParticles[i * particleStride] = Math.random() * simData.width;
+        sabViewParticles[i * particleStride + 1] =
+          Math.random() * simData.height;
+        sabViewParticles[i * particleStride + 2] = (Math.random() * 2 - 1) * 30;
+        sabViewParticles[i * particleStride + 3] = (Math.random() * 2 - 1) * 30;
+      }
+
+      function resize() {
+        const { camera, scene, renderer, workerPool } = simData;
+        simData.width = window.innerWidth;
+        simData.height = window.innerHeight;
+        simData.texture = new THREE.DataTexture(
+          new Uint8Array(simData.width * simData.height),
+          simData.width,
+          simData.height,
+          THREE.RedFormat,
+          THREE.UnsignedByteType,
+          THREE.UVMapping,
+          THREE.ClampToEdge,
+          THREE.ClampToEdge,
+          THREE.NearestFilter,
+          THREE.NearestFilter,
+          0
+        );
+        customMaterial.uniforms.screen.value.set(simData.width, simData.height);
+        customMaterial.uniforms.uTexture.value = simData.texture;
+
+        scene.remove(simData.quad);
+        const geometry = new THREE.PlaneGeometry(simData.width, simData.height);
+        simData.quad = new THREE.Mesh(geometry, customMaterial);
+        simData.quad.position.set(simData.width / 2, simData.height / 2, 0);
+        scene.add(simData.quad);
+
+        sabViewSimData[1] = simData.width;
+        sabViewSimData[2] = simData.height;
+        renderer.setSize(simData.width, simData.height);
+        camera.position.set(simData.width / 2, simData.height / 2, 10);
+        camera.left = simData.width / -2;
+        camera.right = simData.width / 2;
+        camera.top = simData.height / 2;
+        camera.bottom = simData.height / -2;
+        camera.updateProjectionMatrix();
+
+        simData.particleGridA = new Uint8Array(
+          new SharedArrayBuffer(simData.width * simData.height)
+        );
+        simData.particleGridB = new Uint8Array(
+          new SharedArrayBuffer(simData.width * simData.height)
+        );
+
+        // update workers
+        workerPool.forEach((worker, i) => {
+          worker.postMessage({
+            id: i,
+            sabViewParticles,
+            sabViewSimData,
+            particleOffsetStart: WORKER_CHUNK_SIZE * i,
+            particleOffsetEnd: WORKER_CHUNK_SIZE * i + WORKER_CHUNK_SIZE,
+            particleStride,
+            particleGridA: simData.particleGridA,
+            particleGridB: simData.particleGridB,
+          });
+        });
+      }
+      resize();
+
+      window.addEventListener("resize", resize);
+      window.addEventListener("mousemove", (e) => {
+        sabViewSimData[4] = e.clientX;
+        sabViewSimData[5] = simData.height - e.clientY;
+      });
+      window.addEventListener("mousedown", (e) => {
+        sabViewSimData[3] = 1;
+        sabViewSimData[4] = e.clientX;
+        sabViewSimData[5] = simData.height - e.clientY;
+      });
+      window.addEventListener("mouseup", (e) => {
+        sabViewSimData[3] = 0;
+      });
+      window.addEventListener("touchmove", (e) => {
+        e.preventDefault();
+        sabViewSimData[3] = e.targetTouches.length;
+        for (let i = 0; i < e.targetTouches.length; i++) {
+          const touch = e.targetTouches[i];
+          sabViewSimData[i * 2 + 4] = touch.clientX;
+          sabViewSimData[i * 2 + 4 + 1] = simData.height - touch.clientY;
+        }
+      });
+      window.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        sabViewSimData[3] = e.targetTouches.length;
+        for (let i = 0; i < e.targetTouches.length; i++) {
+          const touch = e.targetTouches[i];
+          sabViewSimData[i * 2 + 4] = touch.clientX;
+          sabViewSimData[i * 2 + 4 + 1] = simData.height - touch.clientY;
+        }
+      });
+      window.addEventListener("touchend", (e) => {
+        e.preventDefault();
+        sabViewSimData[3] = 0;
+      });
+      window.addEventListener("touchcancel", (e) => {
+        e.preventDefault();
+        sabViewSimData[3] = 0;
+      });
+
+      function onWorkerMessage() {
+        simData.activeWorkers--;
+        if (simData.activeWorkers !== 0) {
+          return;
+        }
+        requestAnimationFrame(runSimulation);
+      }
+
+      let lastTime = 1;
+      function runSimulation(currentTime) {
+        const dt = Math.min(0.1, (currentTime - lastTime) / 1000);
+        lastTime = currentTime;
+        sabViewSimData[0] = dt;
+        simData.activeWorkers = WORKER_COUNT;
+        simData.workerPool.forEach((worker, i) => {
+          worker.postMessage({});
+        });
+        simData.activeParticleGrid =
+          simData.activeParticleGrid === simData.particleGridA
+            ? simData.particleGridB
+            : simData.particleGridA;
+        render(simData.activeParticleGrid);
+      }
+
+      function render(grid) {
+        simData.texture.image.data.set(grid);
+        simData.texture.needsUpdate = true;
+        simData.renderer.render(simData.scene, simData.camera);
+        grid.fill(0);
+      }
+    </script>
+  </body>
+</html>

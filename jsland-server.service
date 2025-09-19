@@ -1,0 +1,16 @@
+[Unit]
+Description=Javascript Service
+After=network.target
+
+[Service]
+WorkingDirectory=/root/how-fast-is-it/js-land/
+ExecStart=/root/how-fast-is-it/js-land/server
+StandardOutput=append:/var/log/jsland/out.log
+StandardError=append:/var/log/jsland/err.log
+Restart=always
+User=root
+Type=simple
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

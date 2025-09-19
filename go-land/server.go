@@ -74,7 +74,7 @@ var upgrader = websocket.Upgrader{
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const maxClients = 1000
-const particleCount = 2_500_000
+const particleCount = 5_500_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
@@ -90,8 +90,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  2800,
-		height: 2800,
+		width:  1800,
+		height: 1600,
 	}
 )
 
@@ -415,8 +415,8 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 		}
 		var fSimWidth = float32(job.simState.width)
 		var fSimHeight = float32(job.simState.height)
-		var gravPower = job.simState.dt * 6
-		var pullDist float32 = 36000
+		var gravPower = job.simState.dt * 5
+		var pullDist float32 = 32300
 
 		for i := job.startIndex; i < job.endIndex; i++ {
 			p := &particles[i]
@@ -426,7 +426,7 @@ func worker(jobs <-chan SimJob, wg *sync.WaitGroup) {
 				diry := input.Y - p.y
 				dist := dirx*dirx + diry*diry
 				if dist < pullDist && dist > 1 {
-					var grav = 3 / float32(math.Sqrt(float64(dist)))
+					var grav = 4 / float32(math.Sqrt(float64(dist)))
 					p.dx += dirx * gravPower * grav
 					p.dy += diry * gravPower * grav
 				}

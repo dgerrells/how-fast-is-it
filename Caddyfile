@@ -1,3 +1,7 @@
 howfastisgo.dev {
     reverse_proxy localhost:41069
 }
+
+howfastisjavascript.dev {
+    reverse_proxy localhost:8090
+}
