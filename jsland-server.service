@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/root/how-fast-is-it/js-land/
-ExecStart=/root/how-fast-is-it/js-land/server
+ExecStart=bun server.ts
 StandardOutput=append:/var/log/jsland/out.log
 StandardError=append:/var/log/jsland/err.log
 Restart=always
