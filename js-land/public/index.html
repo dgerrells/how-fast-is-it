@@ -25,6 +25,92 @@
         -ms-user-select: none;
         user-select: none;
         outline: none;
+        overflow: hidden;
+      }
+
+      .button-stack {
+        position: absolute;
+        bottom: 1rem;
+        right: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        z-index: 10;
+      }
+
+      .icon-button {
+        background-color: #333;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem;
+        cursor: pointer;
+        border: 1px solid #444;
+        transition: background-color 0.2s ease, transform 0.2s ease;
+        box-shadow: 0 2px 2px rgba(0, 0, 0, 0.3);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .icon-button:hover {
+        transform: translateY(-2px);
+      }
+      .icon-button:active, .icon-button:has(svg:active)  {
+        transform: translateY(0) scale(0.9);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+      }
+      .icon-button svg {
+        width: 1rem;
+        height: 1rem;
+        fill: white;
+        transition: transform 200ms ease;
+      }
+      .icon-button#toggle-filter-btn svg {
+        fill: white;
+      }
+      .icon-button#toggle-filter-btn.active svg {
+        transform: rotate(540deg);
+      }
+
+      canvas {
+        user-select: none;
+      }
+
+      .particle-count-overlay {
+        text-align: center;
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-weight: bold;
+        color: white;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        opacity: 0;
+        transition: opacity 0.5s ease-out;
+        pointer-events: none;
+        z-index: 100;
+        font-family: monospace;
+        font-size: 8vw;
+        letter-spacing: 8px;
+      }
+      .particle-count-text-label {
+        font-size: 4vw;
+        margin-top: 0.5rem;
+        display: block;
+        font-weight: normal;
+        opacity: 1;
+        letter-spacing: 2px;
+      }
+      @media (min-width: 768px) {
+        .particle-count-overlay {
+          font-size: 5vw;
+          letter-spacing: 8px;
+        }
+        .particle-count-text-label {
+          margin-top: 1rem;
+          letter-spacing: 4px;
+          font-size: 3vw;
+        }
       }
     </style>
   </head>
@@ -34,11 +120,27 @@
       width: 100vw;
       height: 100vh;
       background: black;
-      pointer-events: none;
-      overflow: hidden;
-      user-select: none;
     "
   >
+    <nav class="button-stack">
+      <button id="plus-btn" class="icon-button" aria-label="Increase particle count">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+        </svg>
+      </button>
+      <button id="minus-btn" class="icon-button" aria-label="Decrease particle count">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path d="M19 13H5v-2h14v2z" />
+        </svg>
+      </button>
+      <button id="toggle-filter-btn" class="icon-button" aria-label="Toggle visual filter">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path
+            d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 15.93c-.66 0-1.21-.42-1.42-1.02-.27-.76-.08-1.61.54-2.12.56-.47 1.34-.6 2.02-.37.64.22 1.13.78 1.25 1.48.11.66-.1 1.29-.53 1.77-.38.43-.91.64-1.46.64zm3.92-3.13c-.66 0-1.21-.42-1.42-1.02-.27-.76-.08-1.61.54-2.12.56-.47 1.34-.6 2.02-.37.64.22 1.13.78 1.25 1.48.11.66-.1 1.29-.53 1.77-.38.43-.91.64-1.46.64z"
+          />
+        </svg>
+      </button>
+    </nav>
     <script type="module">
       import * as THREE from "three";
       const uap = new UAParser();
@@ -54,9 +156,9 @@
             : navigator.hardwareConcurrency - 1;
       }
 
-      const PARTICLE_COUNT = ~~getQueryParam("count") || 1_000_000;
+      let PARTICLE_COUNT = ~~getQueryParam("count") || 1_000_000;
       const WORKER_COUNT = cores;
-      const WORKER_CHUNK_SIZE = Math.floor(PARTICLE_COUNT / WORKER_COUNT);
+      let WORKER_CHUNK_SIZE = Math.floor(PARTICLE_COUNT / WORKER_COUNT);
       const simData = {
         workerPool: [],
         activeWorkers: 0,
@@ -78,10 +180,11 @@
         texture: null,
         quad: null,
       };
+      const canvas = simData.renderer.domElement;
 
       const particleStride = 6; // 6 floats x,y,dx,dy,sx,sy;
       const particleByteStride = particleStride * 4; // 4 bytes per float
-      const sabViewParticles = new Float32Array(
+      let sabViewParticles = new Float32Array(
         new SharedArrayBuffer(PARTICLE_COUNT * particleByteStride)
       );
       // dt + screen width + screen height + touch count + mouse x + mouse y
@@ -219,20 +322,21 @@
       }
       resize();
 
+      window.addEventListener('contextmenu', (e) => e.preventDefault());
       window.addEventListener("resize", resize);
-      window.addEventListener("mousemove", (e) => {
+      canvas.addEventListener("mousemove", (e) => {
         sabViewSimData[4] = e.clientX;
         sabViewSimData[5] = simData.height - e.clientY;
       });
-      window.addEventListener("mousedown", (e) => {
+      canvas.addEventListener("mousedown", (e) => {
         sabViewSimData[3] = 1;
         sabViewSimData[4] = e.clientX;
         sabViewSimData[5] = simData.height - e.clientY;
       });
-      window.addEventListener("mouseup", (e) => {
+      canvas.addEventListener("mouseup", (e) => {
         sabViewSimData[3] = 0;
       });
-      window.addEventListener("touchmove", (e) => {
+      canvas.addEventListener("touchmove", (e) => {
         e.preventDefault();
         sabViewSimData[3] = e.targetTouches.length;
         for (let i = 0; i < e.targetTouches.length; i++) {
@@ -241,7 +345,7 @@
           sabViewSimData[i * 2 + 4 + 1] = simData.height - touch.clientY;
         }
       });
-      window.addEventListener("touchstart", (e) => {
+      canvas.addEventListener("touchstart", (e) => {
         e.preventDefault();
         sabViewSimData[3] = e.targetTouches.length;
         for (let i = 0; i < e.targetTouches.length; i++) {
@@ -250,11 +354,11 @@
           sabViewSimData[i * 2 + 4 + 1] = simData.height - touch.clientY;
         }
       });
-      window.addEventListener("touchend", (e) => {
+      canvas.addEventListener("touchend", (e) => {
         e.preventDefault();
         sabViewSimData[3] = 0;
       });
-      window.addEventListener("touchcancel", (e) => {
+      canvas.addEventListener("touchcancel", (e) => {
         e.preventDefault();
         sabViewSimData[3] = 0;
       });
@@ -288,6 +392,121 @@
         simData.texture.needsUpdate = true;
         simData.renderer.render(simData.scene, simData.camera);
         grid.fill(0);
+      }
+
+      // buttons
+      const plusBtn = document.getElementById('plus-btn');
+      const minusBtn = document.getElementById('minus-btn');
+      const toggleFilterBtn = document.getElementById('toggle-filter-btn');
+
+      const PARTICLE_INCREMENT = 200_000;
+      const MIN_PARTICLES = 200_000;
+      const url = new URL(window.location.href);
+      let isFilterActive = false;
+
+      const toggleFilter = () => {
+        isFilterActive = !isFilterActive;
+        if (isFilterActive) {
+          canvas.style.filter = 'saturate(3) invert(1)';
+          toggleFilterBtn.classList.add('active');
+        } else {
+          canvas.style.filter = 'saturate(1.25)';
+          toggleFilterBtn.classList.remove('active');
+        }
+      };
+
+      const updateCount = (newCount, filterState) => {
+        const oldCount = PARTICLE_COUNT;
+        const oldBuffer = sabViewParticles;
+        PARTICLE_COUNT = newCount;
+        WORKER_CHUNK_SIZE = Math.floor(PARTICLE_COUNT / WORKER_COUNT);
+        sabViewParticles = new Float32Array(
+          new SharedArrayBuffer(PARTICLE_COUNT * particleByteStride)
+        );
+
+        if (newCount > oldCount) {
+          sabViewParticles.set(oldBuffer.subarray(0, oldCount * particleStride));
+          for (let i = oldCount; i < newCount; i++) {
+            sabViewParticles[i * particleStride] = Math.random() * simData.width;
+            sabViewParticles[i * particleStride + 1] =
+              Math.random() * simData.height;
+            sabViewParticles[i * particleStride + 2] =
+              (Math.random() * 2 - 1) * 30;
+            sabViewParticles[i * particleStride + 3] =
+              (Math.random() * 2 - 1) * 30;
+            sabViewParticles[i * particleStride + 4] =
+              sabViewParticles[i * particleStride];
+            sabViewParticles[i * particleStride + 5] =
+              sabViewParticles[i * particleStride + 1];
+          }
+        } else {
+          sabViewParticles.set(oldBuffer.subarray(0, newCount * particleStride));
+        }
+
+        simData.workerPool.forEach((worker, i) => {
+          worker.postMessage({
+            id: i,
+            sabViewParticles,
+            sabViewSimData,
+            particleOffsetStart: WORKER_CHUNK_SIZE * i,
+            particleOffsetEnd: WORKER_CHUNK_SIZE * i + WORKER_CHUNK_SIZE,
+            particleStride,
+            particleGridA: simData.particleGridA,
+            particleGridB: simData.particleGridB,
+          });
+        });
+
+        animateCountText(oldCount, newCount)
+      };
+
+      plusBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const newCount = PARTICLE_COUNT + PARTICLE_INCREMENT;
+        updateCount(newCount, isFilterActive);
+      });
+
+      minusBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const newCount = Math.max(MIN_PARTICLES, PARTICLE_COUNT - PARTICLE_INCREMENT);
+        if (newCount !== PARTICLE_COUNT) {
+          updateCount(newCount, isFilterActive);
+        }
+      });
+
+      toggleFilterBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        toggleFilter();
+      });
+
+      let lastRequest = null;
+      function animateCountText(oldCount, newCount) {
+        const duration = 1000;
+        const startTime = performance.now();
+        let textElement = document.getElementById('particle-count-text');
+        if (!textElement) {
+          textElement = document.createElement('div');
+          textElement.id = 'particle-count-text';
+          textElement.className = 'particle-count-overlay';
+          document.body.appendChild(textElement);
+        }
+        const formatNumber = (num) => num.toLocaleString('en-US');
+        function updateText(currentTime) {
+          const elapsedTime = currentTime - startTime;
+          const progress = Math.min(elapsedTime / duration, 1);
+          const currentValue = Math.round(oldCount + (newCount - oldCount) * progress);
+          textElement.innerHTML = `${formatNumber(currentValue)}<span class="particle-count-text-label">(particles)</span>`;
+          lastRequest = requestAnimationFrame(updateText);
+          if (elapsedTime > 1500) {
+            textElement.style.opacity = '0';
+            cancelAnimationFrame(lastRequest);
+          }
+        }
+        textElement.textContent = `${formatNumber(oldCount)}`;
+        textElement.style.opacity = '1';
+        if (lastRequest) {
+          cancelAnimationFrame(lastRequest);
+        }
+        lastRequest = requestAnimationFrame(updateText);
       }
     </script>
   </body>

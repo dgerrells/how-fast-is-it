@@ -7,7 +7,7 @@ let cacher = {
   x: 0,
   y: 0,
 };
-const fixedForce = isMobile ? 258300 * 8 : 2583000 * 15;
+const fixedForce = isMobile ? 258300 * 8 : 2583000 * 14;
 
 const simulate = (event) => {
   const {
