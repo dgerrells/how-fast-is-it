@@ -74,7 +74,7 @@ var upgrader = websocket.Upgrader{
 var clientSendChannelMap = make(map[*websocket.Conn]chan []byte)
 
 const maxClients = 1000
-const particleCount = 5_500_000
+const particleCount = 4_000_000
 
 var numThreads = int(math.Min(math.Max(float64(runtime.NumCPU()-1), 1), 8))
 var particlesPerThread = particleCount / numThreads
@@ -90,8 +90,8 @@ var (
 	particles  = []Particle{}
 	simState   = SimState{
 		dt:     1.0 / 60.0,
-		width:  1800,
-		height: 1600,
+		width:  2200,
+		height: 2200,
 	}
 )
 
@@ -214,12 +214,17 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 		for i, c := range clients {
 			if c == conn {
 				clients = append(clients[:i], clients[i+1:]...)
-				inputs[i] = Input{}
-				cameras[i] = ClientCam{}
-				cameras[i].X = float32(simState.width)/2 - 300
-				cameras[i].Y = float32(simState.height)/2 - 300
-				cameras[i].Width = 1
-				cameras[i].Height = 1
+				for j := i; j < len(clients); j++ {
+					inputs[j] = inputs[j+1]
+					cameras[j] = cameras[j+1]
+				}
+				var endIndex = len(clients)
+				inputs[endIndex] = Input{}
+				cameras[endIndex] = ClientCam{}
+				cameras[endIndex].X = float32(simState.width)/2 - 300
+				cameras[endIndex].Y = float32(simState.height)/2 - 300
+				cameras[endIndex].Width = 1
+				cameras[endIndex].Height = 1
 				break
 			}
 		}
