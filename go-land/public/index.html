@@ -245,19 +245,19 @@
             }
         }
 
-        window.addEventListener('focus', () => {
-            if (!ws || ws.readyState !== WebSocket.OPEN) {
-                connectWebSocket();
-            }
-        });
+        // window.addEventListener('focus', () => {
+        //     if (!ws || ws.readyState !== WebSocket.OPEN) {
+        //         connectWebSocket();
+        //     }
+        // });
 
-        document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') {
-                if (!ws || ws.readyState !== WebSocket.OPEN) {
-                    connectWebSocket();
-                }
-            }
-        });
+        // document.addEventListener('visibilitychange', () => {
+        //     if (document.visibilityState === 'visible') {
+        //         if (!ws || ws.readyState !== WebSocket.OPEN) {
+        //             connectWebSocket();
+        //         }
+        //     }
+        // });
 
         document.addEventListener('mousedown', (e) => {
             if (e.button === 0) {
