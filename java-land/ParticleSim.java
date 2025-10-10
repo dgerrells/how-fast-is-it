@@ -41,6 +41,7 @@ public class ParticleSim {
 
         frame.pack();
         frame.setLocationRelativeTo(null);
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setVisible(true);
 
         particlePanel.startSimulation();
@@ -48,7 +49,7 @@ public class ParticleSim {
 }
 
 class ParticlePanel extends JPanel
-        implements ActionListener, MouseListener, MouseMotionListener, ComponentListener, KeyListener {
+        implements MouseListener, MouseMotionListener, ComponentListener, KeyListener {
 
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
@@ -56,8 +57,7 @@ class ParticlePanel extends JPanel
     private static final FloatVector MIN_DIST_SQ_VEC = FloatVector.broadcast(F_SPECIES, 1.0f);
     private static final float FRICTION = 0.9f;
 
-    private static final int NUM_PARTICLES = 1_000_000;
-    private static final int UPDATE_RATE = 1000 / 60;
+    private static final int NUM_PARTICLES = 20_000_000;
 
     private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
 
@@ -78,16 +78,21 @@ class ParticlePanel extends JPanel
 
     private Point mousePosition = new Point(0, 0);
     private boolean isMousePressed = false;
-    private final Timer timer;
+
+    private volatile boolean running = false;
+    private Thread gameLoopThread;
+    private static final long NS_PER_SECOND = 1_000_000_000L;
+    private static final double TARGET_FPS = 60.0;
+    private static final double NS_PER_TICK = NS_PER_SECOND / TARGET_FPS;
+    private boolean isResizeRequested = false;
+    private boolean isResetRequested = false;
+    private boolean isPanning = false;
 
     private long lastTickTime;
-    private long fpsTimer;
-    private int frames;
-    private static final long ONE_SECOND_NS = 1_000_000_000L;
-
-    private boolean isTicking = false;
+    private int frames = 0;
 
     public ParticlePanel(int width, int height) {
+        setSize(width, height);
         setPreferredSize(new Dimension(width, height));
         this.handleResize(width, height);
 
@@ -96,11 +101,12 @@ class ParticlePanel extends JPanel
         addMouseMotionListener(this);
         addComponentListener(this);
         addKeyListener(this);
-        timer = new Timer(UPDATE_RATE, this);
         setBackground(Color.BLACK);
+        setFocusable(true);
+        requestFocusInWindow();
+        setIgnoreRepaint(true);
 
         lastTickTime = System.nanoTime();
-        fpsTimer = lastTickTime;
         frames = 0;
     }
 
@@ -141,34 +147,58 @@ class ParticlePanel extends JPanel
     }
 
     public void startSimulation() {
-        timer.start();
+        if (!running) {
+            running = true;
+            gameLoopThread = new Thread(this::gameLoop);
+            gameLoopThread.start();
+        }
     }
 
-    @Override
-    public void actionPerformed(ActionEvent e) {
-        if (isTicking) {
-            return;
+    private void gameLoop() {
+        lastTickTime = System.nanoTime();
+
+        while (running) {
+            long now = System.nanoTime();
+            long timeElapsed = now - lastTickTime;
+            this.processInputRequests();
+
+            if (timeElapsed >= NS_PER_TICK) {
+                float deltaTime = timeElapsed / (float) NS_PER_SECOND;
+                lastTickTime = now;
+
+                long tickStart = System.nanoTime();
+                tick(deltaTime);
+                long tickEnd = System.nanoTime();
+                long tickDuration = (tickEnd - tickStart);
+
+                long renderStart = System.nanoTime();
+                render();
+                long renderEnd = System.nanoTime();
+                long renderDuration = (renderEnd - renderStart);
+
+                Graphics g = getGraphics();
+                g.drawImage(image, 0, 0, this);
+                g.dispose();
+                Toolkit.getDefaultToolkit().sync();
+                frames++;
+
+                if (frames % TARGET_FPS == 0) {
+                    float tickDurationMs = tickDuration / 1_000_000.0f;
+                    float renderDurationMs = renderDuration / 1_000_000.0f;
+                    System.out.printf("(Tick): %.3f ms\n", tickDurationMs);
+                    System.out.printf("(Render): %.3f ms\n", renderDurationMs);
+                    System.out.printf("(Total): %.3f ms\n", tickDurationMs + renderDurationMs);
+                }
+            } else {
+                try {
+                    Thread.sleep(1);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    System.err.println("Game loop interrupted.");
+                    running = false;
+                }
+            }
         }
-        isTicking = true;
-
-        long now = System.nanoTime();
-
-        float deltaTime = (now - lastTickTime) / 1_000_000_000.0f;
-        lastTickTime = now;
-
-        tick(deltaTime);
-        render();
-        repaint();
-
-        frames++;
-        if (now - fpsTimer >= ONE_SECOND_NS) {
-            float fps = (float) frames * ONE_SECOND_NS / (now - fpsTimer);
-            System.out.printf("FPS: %.2f\n", fps);
-            System.out.println("panel size: " + getWidth() + " " + getHeight());
-            frames = 0;
-            fpsTimer = now;
-        }
-        isTicking = false;
     }
 
     private void tick(float deltaTime) {
@@ -296,27 +326,13 @@ class ParticlePanel extends JPanel
         final int h = this.height;
         final byte empty = (byte) 0;
         final int full = 255;
-        // Arrays.fill(pixelArray, empty);
-
-        // for (int i = 0; i < NUM_PARTICLES; i++) {
-        // int px = (int) positionsX[i];
-        // int py = (int) positionsY[i];
-        // int index = py * w + px;
-
-        // if (px < 0 || px >= w || py < 0 || py >= h) {
-        // continue;
-        // }
-
-        // int lu = pixelArray[index] & 0xFF;
-        // lu = Math.min(255, lu + 20);
-        // pixelArray[index] = (byte) lu;
-        // }
 
         final int PARTICLES_PER_CHUNK = NUM_PARTICLES / CPU_COUNT;
         int[] buff = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
         Arrays.fill(buff, 0);
         IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
             int[] localPixelArray = threadPixelBuffers[chunkIndex];
+            int max = localPixelArray.length - 1;
             Arrays.fill(localPixelArray, empty);
             int start = chunkIndex * PARTICLES_PER_CHUNK;
             int end = (chunkIndex == CPU_COUNT - 1) ? NUM_PARTICLES
@@ -324,17 +340,18 @@ class ParticlePanel extends JPanel
                             PARTICLES_PER_CHUNK;
 
             for (int i = start; i < end; i++) {
-                int px = (int) positionsX[i];
-                int py = (int) positionsY[i];
+                int px = (int) Math.min(Math.max(positionsX[i], 0), w - 1);
+                int py = (int) Math.min(Math.max(positionsY[i], 0), h - 1);
                 int index = py * w + px;
+                localPixelArray[index] = colors[i];
 
-                if (px >= 0 && px < w && py >= 0 && py < h) {
-                    // int lu = localPixelArray[index] & 0xFF;
-                    // lu = Math.min(255, lu + 20);
-                    // localPixelArray[index] = (byte) lu;
-                    // buff[index] = colors[i];
-                    localPixelArray[index] = colors[i];
-                }
+                // if (px >= 0 && px < w && py >= 0 && py < h) {
+                // int lu = localPixelArray[index] & 0xFF;
+                // lu = Math.min(255, lu + 20);
+                // localPixelArray[index] = (byte) lu;
+                // buff[index] = colors[i];
+                // localPixelArray[Math.max(0, Math.min(max, index))] = colors[i];
+                // }
             }
         });
 
@@ -355,6 +372,7 @@ class ParticlePanel extends JPanel
                         r = ((col >> 16) & 0xFF);
                         g = ((col >> 8) & 0xFF);
                         b = ((col >> 0) & 0xFF);
+                        break;
                     }
                     // if (col == 0) {
                     // col = threadPixelBuffers[localIndex][i];
@@ -399,57 +417,48 @@ class ParticlePanel extends JPanel
             // }
             // }
         });
-
-        // int[] buff = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
-        // final float BASE_SCALING = 2.0f;
-        // for (int i = 0; i < pixelArray.length; i++) {
-        // int count = pixelArray[i] & 0xFF;
-        // int y = i / w;
-        // int x = i % w;
-        // int col = 0;
-        // float r_base = (((float) y / h) * BASE_SCALING);
-        // float g_base = (((float) x / w) * BASE_SCALING);
-        // float b_base = ((1.0f - ((float) x / w)) * BASE_SCALING);
-        // int r_final = (int) Math.min(255.0f, r_base * count);
-        // int g_final = (int) Math.min(255.0f, g_base * count);
-        // int b_final = (int) Math.min(255.0f, b_base * count);
-        // col |= 0xFF << 24;
-        // col |= (r_final & 0xFF) << 16;
-        // col |= (g_final & 0xFF) << 8;
-        // col |= (b_final & 0xFF);
-
-        // buff[i] = col;
-        // // col |= 0xFF << 24;
-        // // int r_value = (int) (((float) y / h) * 255.0f * (count / 255.0f));
-        // // col |= (r_value & 0xFF) << 16;
-        // // int g_value = (int) (((float) x / w) * 255.0f * (count / 255.0f));
-        // // col |= (g_value & 0xFF) << 8;
-        // // int b_value = (int) ((1.0f - ((float) x / w)) * 255.0f * (count /
-        // 255.0f));
-        // // col |= (b_value & 0xFF);
-        // // buff[i] = col;
-        // }
     }
 
-    @Override
-    protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
-        g.drawImage(image, 0, 0, this);
+    private void processInputRequests() {
+        if (this.isResizeRequested) {
+            this.isResizeRequested = false;
+            this.handleResize(getWidth(), getHeight());
+        }
+        if (this.isResetRequested) {
+            this.isResetRequested = false;
+            this.initializeParticles();
+        }
     }
 
     @Override
     public void mousePressed(MouseEvent e) {
-        isMousePressed = true;
+        if (e.getButton() == MouseEvent.BUTTON1) {
+            isMousePressed = true;
+        }
+        if (e.getButton() == MouseEvent.BUTTON3) {
+            isPanning = true;
+        }
         mousePosition = e.getPoint();
     }
 
     @Override
     public void mouseReleased(MouseEvent e) {
         isMousePressed = false;
+        isPanning = false;
     }
 
     @Override
     public void mouseDragged(MouseEvent e) {
+        Point last = mousePosition;
+        if (isPanning) {
+            last.x -= e.getPoint().x;
+            last.y -= e.getPoint().y;
+            for (int i = 0; i < NUM_PARTICLES; i++) {
+                positionsX[i] -= last.x;
+                positionsY[i] -= last.y;
+            }
+        }
+
         mousePosition = e.getPoint();
     }
 
@@ -471,24 +480,21 @@ class ParticlePanel extends JPanel
 
     @Override
     public void componentResized(ComponentEvent e) {
-        this.handleResize(getWidth(), getHeight());
+        System.out.println("w " + getWidth() + " h " + getHeight());
+        this.isResizeRequested = true;
     }
 
     private void handleResize(int w, int h) {
         this.width = w;
         this.height = h;
+        this.setSize(w, h);
+        System.out.println("w2 " + getWidth() + " h2 " + getHeight());
         this.image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        initializeParticles();
 
         threadPixelBuffers = new int[CPU_COUNT][];
         for (int i = 0; i < CPU_COUNT; i++) {
             threadPixelBuffers[i] = new int[w * h];
         }
-        // this.pixelArray = new byte[w * h];
-        // threadPixelBuffers = new byte[CPU_COUNT][];
-        // for (int i = 0; i < CPU_COUNT; i++) {
-        // threadPixelBuffers[i] = new byte[w * h];
-        // }
     }
 
     @Override
@@ -547,24 +553,22 @@ class ParticlePanel extends JPanel
 
     @Override
     public void keyTyped(KeyEvent e) {
-        System.out.println("wtf");
-        if (e.getKeyCode() == KeyEvent.VK_SPACE) {
-            for (int i = 0; i < this.velocitiesX.length; i++) {
-                velocitiesX[i] = 0;
-                velocitiesY[i] = 0;
+        if (e.getKeyChar() == ' ') {
+            for (int i = 0; i < NUM_PARTICLES; i++) {
+                velocitiesX[i] *= 0.2f;
+                velocitiesY[i] *= 0.2f;
             }
+        }
+        if (e.getKeyChar() == 'r') {
+            this.isResetRequested = true;
         }
     }
 
     @Override
     public void keyPressed(KeyEvent e) {
-        System.out.println("wtf");
-
     }
 
     @Override
     public void keyReleased(KeyEvent e) {
-        System.out.println("wtf");
-
     }
 }
