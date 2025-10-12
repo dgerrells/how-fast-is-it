@@ -1,9 +1,13 @@
+import javax.imageio.ImageIO;
 import javax.swing.*;
+import javax.swing.filechooser.FileNameExtensionFilter;
+
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferInt;
+import java.io.File;
 import java.util.Random;
 import java.util.stream.IntStream;
 import java.util.Arrays;
@@ -15,11 +19,6 @@ import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 import static jdk.incubator.vector.VectorOperators.*;
 
-/**
- * A 2D particle simulation using Java Swing, designed for performance
- * with a structure fully optimized for the Java Vector API (SIMD) usage.
- * Rendering uses a fast pixel array buffer with 8-bit particle "color" data.
- */
 public class ParticleSim {
 
     public static void main(String[] args) {
@@ -30,7 +29,7 @@ public class ParticleSim {
     }
 
     private void createAndShowGUI() {
-        JFrame frame = new JFrame("Vector API Particle Sim (Requires flags)");
+        JFrame frame = new JFrame("Sips Java");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 
         int width = 900;
@@ -53,7 +52,7 @@ class ParticlePanel extends JPanel
 
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
-    private static final FloatVector PULL_VEC = FloatVector.broadcast(F_SPECIES, 280f);
+    private static final float PULL_FORCE = 200f;
     private static final FloatVector MIN_DIST_SQ_VEC = FloatVector.broadcast(F_SPECIES, 1.0f);
     private static final float FRICTION = 0.9f;
 
@@ -86,7 +85,13 @@ class ParticlePanel extends JPanel
     private static final double NS_PER_TICK = NS_PER_SECOND / TARGET_FPS;
     private boolean isResizeRequested = false;
     private boolean isResetRequested = false;
+    final int resetSquareType = 1;
+    final int resetSquareMultiType = 2;
+    final int resetCircleType = 3;
+    final int resetImageType = 4;
+    private int resetType = 0;
     private boolean isPanning = false;
+    private boolean shouldReturnToStart = false;
 
     private long lastTickTime;
     private int frames = 0;
@@ -96,7 +101,7 @@ class ParticlePanel extends JPanel
         setPreferredSize(new Dimension(width, height));
         this.handleResize(width, height);
 
-        initializeParticles();
+        placeParticlesSquare();
         addMouseListener(this);
         addMouseMotionListener(this);
         addComponentListener(this);
@@ -108,31 +113,6 @@ class ParticlePanel extends JPanel
 
         lastTickTime = System.nanoTime();
         frames = 0;
-    }
-
-    private void initializeParticles() {
-        final float centerX = this.width / 2.0f;
-        final float centerY = this.height / 2.0f;
-
-        final float L_CONSTANT = 0.7f;
-        final float C_CONSTANT = 0.25f;
-
-        for (int i = 0; i < NUM_PARTICLES; i++) {
-            positionsX[i] = (float) this.width * fastRandomFloat();
-            positionsY[i] = (float) this.height * fastRandomFloat();
-            startX[i] = positionsX[i];
-            startY[i] = positionsY[i];
-            velocitiesX[i] = 0;
-            velocitiesY[i] = 0;
-
-            float dx = positionsX[i] - centerX;
-            float dy = positionsY[i] - centerY;
-            double angleRadians = Math.atan2(dy, dx);
-            float h = (float) ((angleRadians + Math.PI) / (2.0 * Math.PI));
-            float a = (float) (C_CONSTANT * Math.cos(angleRadians));
-            float b = (float) (C_CONSTANT * Math.sin(angleRadians));
-            colors[i] = calculateOklabColor(L_CONSTANT, a, b);
-        }
     }
 
     private long xorshiftState = 1;
@@ -207,17 +187,15 @@ class ParticlePanel extends JPanel
         final float wFloat = (float) w;
         final float hFloat = (float) h;
 
-        final FloatVector DT_VEC = FloatVector.broadcast(F_SPECIES, deltaTime);
         final FloatVector W_VEC = FloatVector.broadcast(F_SPECIES, wFloat);
         final FloatVector H_VEC = FloatVector.broadcast(F_SPECIES, hFloat);
         final FloatVector ZERO_VEC = FloatVector.broadcast(F_SPECIES, 0.0f);
         final FloatVector MOUSE_X_VEC = FloatVector.broadcast(F_SPECIES, (float) mousePosition.x);
         final FloatVector MOUSE_Y_VEC = FloatVector.broadcast(F_SPECIES, (float) mousePosition.y);
-        final FloatVector PULL_SCALED_VEC = PULL_VEC.mul(DT_VEC);
+        final FloatVector MIN_DIST_RETURN_VEC = FloatVector.broadcast(F_SPECIES, 0.5f);
+        final float gf = PULL_FORCE * deltaTime;
         final float frictionScalar = (float) Math.pow(FRICTION, deltaTime);
         final FloatVector FRICTION_DT_VEC = FloatVector.broadcast(F_SPECIES, frictionScalar);
-        final float pullForce = PULL_VEC.lane(0) * deltaTime;
-        final float dt_scalar = deltaTime;
         final boolean mouseIsPressed = isMousePressed;
 
         final int VECTOR_CHUNKS = NUM_PARTICLES / LANE_SIZE;
@@ -238,17 +216,35 @@ class ParticlePanel extends JPanel
 
                 if (gravityMask.anyTrue()) {
                     FloatVector dist = distSq.sqrt();
-                    FloatVector forceX = dx.div(dist).mul(PULL_SCALED_VEC);
-                    FloatVector forceY = dy.div(dist).mul(PULL_SCALED_VEC);
+                    FloatVector forceX = dx.div(dist).mul(gf);
+                    FloatVector forceY = dy.div(dist).mul(gf);
                     vx = vx.add(forceX, gravityMask);
                     vy = vy.add(forceY, gravityMask);
                 }
             }
 
+            if (shouldReturnToStart) {
+                FloatVector sx = FloatVector.fromArray(F_SPECIES, startX, i);
+                FloatVector sy = FloatVector.fromArray(F_SPECIES, startY, i);
+                FloatVector dx = sx.sub(px);
+                FloatVector dy = sy.sub(py);
+                FloatVector distSq = dx.mul(dx).add(dy.mul(dy));
+                var distMask = distSq.compare(GT, MIN_DIST_RETURN_VEC);
+
+                if (distMask.anyTrue()) {
+                    FloatVector dist = distSq.sqrt();
+                    FloatVector forceX = dx.div(dist).mul(2f);
+                    FloatVector forceY = dy.div(dist).mul(2f);
+                    vx = vx.add(forceX, distMask);
+                    vy = vy.add(forceY, distMask);
+                }
+
+            }
+
+            px = px.add(vx.mul(deltaTime));
+            py = py.add(vy.mul(deltaTime));
             vx = vx.mul(FRICTION_DT_VEC);
             vy = vy.mul(FRICTION_DT_VEC);
-            px = px.add(vx.mul(DT_VEC));
-            py = py.add(vy.mul(DT_VEC));
 
             // var maskLeftX = px.compare(LT, ZERO_VEC);
             // var maskRightX = px.compare(GT, W_VEC);
@@ -287,8 +283,8 @@ class ParticlePanel extends JPanel
 
                 if (distSq > 1.0f) {
                     float dist = (float) Math.sqrt(distSq);
-                    float forceX = (dx / dist) * pullForce;
-                    float forceY = (dy / dist) * pullForce;
+                    float forceX = (dx / dist) * gf;
+                    float forceY = (dy / dist) * gf;
                     vx += forceX;
                     vy += forceY;
                 }
@@ -296,23 +292,8 @@ class ParticlePanel extends JPanel
 
             vx *= frictionScalar;
             vy *= frictionScalar;
-            px += vx * dt_scalar;
-            py += vy * dt_scalar;
-
-            if (px < 0) {
-                vx = -vx;
-                px = 0;
-            } else if (px > w) {
-                vx = -vx;
-                px = w;
-            }
-            if (py < 0) {
-                vy = -vy;
-                py = 0;
-            } else if (py > h) {
-                vy = -vy;
-                py = h;
-            }
+            px += vx * deltaTime;
+            py += vy * deltaTime;
 
             positionsX[i] = px;
             positionsY[i] = py;
@@ -325,7 +306,6 @@ class ParticlePanel extends JPanel
         final int w = this.width;
         final int h = this.height;
         final byte empty = (byte) 0;
-        final int full = 255;
 
         final int PARTICLES_PER_CHUNK = NUM_PARTICLES / CPU_COUNT;
         int[] buff = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
@@ -362,60 +342,17 @@ class ParticlePanel extends JPanel
             int end = (chunkIndex == CPU_COUNT - 1) ? PIXEL_COUNT : start + chunkSize;
 
             for (int i = start; i < end; i++) {
-                int a = 255;
-                int r = 0;
-                int g = 0;
-                int b = 0;
+                int color = 0;
+
                 for (int localIndex = 0; localIndex < CPU_COUNT; localIndex++) {
                     int col = threadPixelBuffers[localIndex][i];
                     if (col != 0) {
-                        r = ((col >> 16) & 0xFF);
-                        g = ((col >> 8) & 0xFF);
-                        b = ((col >> 0) & 0xFF);
+                        color = col;
                         break;
                     }
-                    // if (col == 0) {
-                    // col = threadPixelBuffers[localIndex][i];
-                    // }
-
                 }
-                buff[i] = Math.min(255, a) << 24 | Math.min(r, 255) << 16 | Math.min(g, 255) << 8
-                        | Math.min(b, 255);
+                buff[i] = (0xFF << 24) | color;
             }
-
-            // for (int localIndex = 0; localIndex < CPU_COUNT; localIndex++) {
-            // int[] localArray = threadPixelBuffers[localIndex];
-
-            // int i = start;
-            // // vector cannot handle unsigned bytes fing lame
-            // // it also isn't faster so doesn't matter.
-            // // for (; i <= end - W_LANE_SIZE; i += W_LANE_SIZE) {
-            // // ByteVector mainPixels = ByteVector.fromArray(B_SPECIES, pixelArray, i);
-            // // ByteVector localPixels = ByteVector.fromArray(B_SPECIES, localArray, i);
-            // // ByteVector summedPixels = mainPixels.add(localPixels);
-            // // ByteVector finalPixels = summedPixels.min(MAX_LUM).reinterpretAsBytes();
-            // // finalPixels.intoArray(pixelArray, i);
-            // // }
-
-            // for (; i < end; i++) {
-            // // int current = pixelArray[i] & 0xFF;
-            // // int local = localArray[i] & 0xFF;
-            // // int summed = current + local;
-            // // pixelArray[i] = (byte) Math.min(255, summed);
-
-            // int col = buff[i];
-            // int a = (col << 24) & 0xFF;
-            // int r = (col << 16) & 0xFF;
-            // int g = (col << 8) & 0xFF;
-            // int b = col & 0xFF;
-            // int in = [i];
-            // int a = (col << 24) & 0xFF;
-            // int r = (col << 16) & 0xFF;
-            // int g = (col << 8) & 0xFF;
-            // int b = col & 0xFF;
-            // buff[i] = localArray[i];
-            // }
-            // }
         });
     }
 
@@ -426,7 +363,18 @@ class ParticlePanel extends JPanel
         }
         if (this.isResetRequested) {
             this.isResetRequested = false;
-            this.initializeParticles();
+            if (resetType == resetSquareType) {
+                placeParticlesSquare();
+            }
+            if (resetType == resetSquareMultiType) {
+                placeParticlesSquareMulti();
+            }
+            if (resetType == resetCircleType) {
+                placeParticlesCircle();
+            }
+            if (resetType == resetImageType) {
+                placeParticlesAsImage();
+            }
         }
     }
 
@@ -456,6 +404,8 @@ class ParticlePanel extends JPanel
             for (int i = 0; i < NUM_PARTICLES; i++) {
                 positionsX[i] -= last.x;
                 positionsY[i] -= last.y;
+                startX[i] -= last.x;
+                startY[i] -= last.y;
             }
         }
 
@@ -480,7 +430,6 @@ class ParticlePanel extends JPanel
 
     @Override
     public void componentResized(ComponentEvent e) {
-        System.out.println("w " + getWidth() + " h " + getHeight());
         this.isResizeRequested = true;
     }
 
@@ -488,7 +437,6 @@ class ParticlePanel extends JPanel
         this.width = w;
         this.height = h;
         this.setSize(w, h);
-        System.out.println("w2 " + getWidth() + " h2 " + getHeight());
         this.image = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
 
         threadPixelBuffers = new int[CPU_COUNT][];
@@ -559,8 +507,24 @@ class ParticlePanel extends JPanel
                 velocitiesY[i] *= 0.2f;
             }
         }
-        if (e.getKeyChar() == 'r') {
+        if (e.getKeyChar() == '2') {
             this.isResetRequested = true;
+            this.resetType = resetSquareMultiType;
+        }
+        if (e.getKeyChar() == '1') {
+            this.isResetRequested = true;
+            this.resetType = resetSquareType;
+        }
+        if (e.getKeyChar() == '3') {
+            this.isResetRequested = true;
+            this.resetType = resetCircleType;
+        }
+        if (e.getKeyChar() == '4') {
+            this.isResetRequested = true;
+            this.resetType = resetImageType;
+        }
+        if (e.getKeyChar() == 'r') {
+            this.shouldReturnToStart = !this.shouldReturnToStart;
         }
     }
 
@@ -570,5 +534,206 @@ class ParticlePanel extends JPanel
 
     @Override
     public void keyReleased(KeyEvent e) {
+    }
+
+    private void placeParticlesSquare() {
+        final float centerX = this.width / 2.0f;
+        final float centerY = this.height / 2.0f;
+
+        final float L_CONSTANT = 0.7f;
+        final float C_CONSTANT = 0.25f;
+
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            positionsX[i] = (float) this.width * fastRandomFloat();
+            positionsY[i] = (float) this.height * fastRandomFloat();
+            startX[i] = positionsX[i];
+            startY[i] = positionsY[i];
+            velocitiesX[i] = 0;
+            velocitiesY[i] = 0;
+
+            float dx = positionsX[i] - centerX;
+            float dy = positionsY[i] - centerY;
+            double angleRadians = Math.atan2(dy, dx);
+            float h = (float) ((angleRadians + Math.PI) / (2.0 * Math.PI));
+            float a = (float) (C_CONSTANT * Math.cos(angleRadians));
+            float b = (float) (C_CONSTANT * Math.sin(angleRadians));
+            colors[i] = calculateOklabColor(L_CONSTANT, a, b);
+        }
+    }
+
+    private void placeParticlesCircle() {
+        final float centerX = this.width / 2.0f;
+        final float centerY = this.height / 2.0f;
+
+        final float L_CONSTANT = 0.7f;
+        final float C_CONSTANT = 0.25f;
+        final float radius = Math.min(this.width, this.height) / 2;
+
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            var d = fastRandomFloat() * radius;
+            var angle = fastRandomFloat() * 2 * Math.PI;
+            var cosA = (float) Math.cos(angle);
+            var sinA = (float) Math.sin(angle);
+            positionsX[i] = cosA * d + centerX;
+            positionsY[i] = sinA * d + centerY;
+            startX[i] = positionsX[i];
+            startY[i] = positionsY[i];
+            velocitiesX[i] = 0;
+            velocitiesY[i] = 0;
+
+            float a = (float) (C_CONSTANT * cosA);
+            float b = (float) (C_CONSTANT * sinA);
+            colors[i] = calculateOklabColor(L_CONSTANT, a, b);
+        }
+    }
+
+    private void placeParticlesAsImage() {
+        float width = this.width;
+        float height = this.height;
+        SwingUtilities.invokeLater(new Runnable() {
+            @Override
+            public void run() {
+                JFileChooser fileChooser = new JFileChooser();
+                fileChooser.setDialogTitle("Select Image Input File");
+                FileNameExtensionFilter filter = new FileNameExtensionFilter(
+                        "Image Files (JPG, PNG, GIF)", "jpg", "jpeg", "png", "gif");
+                fileChooser.setFileFilter(filter);
+
+                // Use 'null' as the parent if 'this' is not available or if the method
+                // is not part of a visible component.
+                int userSelection = fileChooser.showOpenDialog(null);
+
+                if (userSelection == JFileChooser.APPROVE_OPTION) {
+                    File selectedFile = fileChooser.getSelectedFile();
+
+                    if (selectedFile != null && selectedFile.exists()) {
+                        try {
+                            BufferedImage sourceImage = ImageIO.read(selectedFile);
+
+                            // The original code checked 'if (image == null)'.
+                            // This uses 'sourceImage' which was just read.
+                            if (sourceImage == null) {
+                                JOptionPane.showMessageDialog(
+                                        null,
+                                        "Error: File is not a valid image format.",
+                                        "Loading Error",
+                                        JOptionPane.ERROR_MESSAGE);
+                                return;
+                            }
+
+                            final int N = NUM_PARTICLES;
+                            final int particleGridSide = (int) Math.floor(Math.sqrt(N));
+                            final int sourceW = sourceImage.getWidth();
+                            final int sourceH = sourceImage.getHeight();
+
+                            float scaleFactorW = (float) particleGridSide / sourceW;
+                            float scaleFactorH = (float) particleGridSide / sourceH;
+                            float scaleFactor = Math.min(scaleFactorW, scaleFactorH);
+                            int scaledW = (int) (sourceW * scaleFactor);
+                            int scaledH = (int) (sourceH * scaleFactor);
+
+                            final int particlesToUseBase = scaledW * scaledH;
+
+                            BufferedImage scaledImage = new BufferedImage(scaledW, scaledH, BufferedImage.TYPE_INT_RGB);
+                            Graphics2D g = scaledImage.createGraphics();
+                            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                                    RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                            g.drawImage(sourceImage, 0, 0, scaledW, scaledH, null);
+                            g.dispose();
+                            int[] baseColors = new int[particlesToUseBase];
+                            float[] baseX = new float[particlesToUseBase];
+                            float[] baseY = new float[particlesToUseBase];
+                            final float centerImageX = (width - scaledW) / 2.0f;
+                            final float centerImageY = (height - scaledH) / 2.0f;
+
+                            int baseIndex = 0;
+                            for (int y = 0; y < scaledH; y++) {
+                                for (int x = 0; x < scaledW; x++) {
+                                    baseX[baseIndex] = centerImageX + x;
+                                    baseY[baseIndex] = centerImageY + y;
+                                    baseColors[baseIndex] = scaledImage.getRGB(x, y);
+                                    baseIndex++;
+                                }
+                            }
+
+                            for (int i = 0; i < N; i++) {
+                                int sourceIndex = i % particlesToUseBase;
+                                positionsX[i] = baseX[sourceIndex];
+                                positionsY[i] = baseY[sourceIndex];
+                                startX[i] = baseX[sourceIndex];
+                                startY[i] = baseY[sourceIndex];
+                                velocitiesX[i] = 0;
+                                velocitiesY[i] = 0;
+                                colors[i] = baseColors[sourceIndex];
+                            }
+
+                        } catch (Exception e) {
+                            JOptionPane.showMessageDialog(
+                                    null,
+                                    "Error reading file: " + e.getMessage(),
+                                    "Loading Error",
+                                    JOptionPane.ERROR_MESSAGE);
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private void placeParticlesSquareMulti() {
+        final float L_CONSTANT = 0.7f;
+        final float C_CONSTANT = 0.25f;
+        final float EPSILON = 1.0f;
+
+        final int NUM_CENTERS = 5;
+        final float[] targetX = new float[NUM_CENTERS];
+        final float[] targetY = new float[NUM_CENTERS];
+
+        final float margin = 0.12f;
+        final float minX = this.width * margin;
+        final float maxX = this.width * (1.0f - margin);
+        final float rangeX = maxX - minX;
+
+        final float minY = this.height * margin;
+        final float maxY = this.height * (1.0f - margin);
+        final float rangeY = maxY - minY;
+
+        for (int j = 0; j < NUM_CENTERS; j++) {
+            targetX[j] = minX + rangeX * fastRandomFloat();
+            targetY[j] = minY + rangeY * fastRandomFloat();
+        }
+
+        for (int i = 0; i < NUM_PARTICLES; i++) {
+            positionsX[i] = (float) this.width * fastRandomFloat();
+            positionsY[i] = (float) this.height * fastRandomFloat();
+            startX[i] = positionsX[i];
+            startY[i] = positionsY[i];
+            velocitiesX[i] = 0;
+            velocitiesY[i] = 0;
+
+            float totalWeight = 0;
+            double blendedA = 0;
+            double blendedB = 0;
+
+            for (int j = 0; j < NUM_CENTERS; j++) {
+                float dxToCenter = positionsX[i] - targetX[j];
+                float dyToCenter = positionsY[i] - targetY[j];
+                float distSq = dxToCenter * dxToCenter + dyToCenter * dyToCenter;
+                float weight = 1.0f / (distSq + EPSILON);
+                totalWeight += weight;
+                double angleRadians = Math.atan2(dyToCenter, dxToCenter);
+                double centerA = C_CONSTANT * Math.cos(angleRadians);
+                double centerB = C_CONSTANT * Math.sin(angleRadians);
+
+                blendedA += centerA * weight;
+                blendedB += centerB * weight;
+            }
+
+            float finalA = (float) (blendedA / totalWeight);
+            float finalB = (float) (blendedB / totalWeight);
+
+            colors[i] = calculateOklabColor(L_CONSTANT, finalA, finalB);
+        }
     }
 }
