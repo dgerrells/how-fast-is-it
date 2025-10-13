@@ -9,12 +9,19 @@ import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferInt;
 import java.io.File;
 import java.util.Random;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.stream.IntStream;
+import java.util.ArrayList;
 import java.util.Arrays;
 
 import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
+import jdk.incubator.vector.IntVector;
 import jdk.incubator.vector.ShortVector;
+import jdk.incubator.vector.VectorMask;
 import jdk.incubator.vector.VectorOperators;
 import jdk.incubator.vector.VectorSpecies;
 import static jdk.incubator.vector.VectorOperators.*;
@@ -50,33 +57,34 @@ public class ParticleSim {
 class ParticlePanel extends JPanel
         implements MouseListener, MouseMotionListener, ComponentListener, KeyListener {
 
+    public final float PULL_FORCE = 800f;
+    public final float MIN_PULL_DIST = 1.0f;
+    public final float FRICTION = 0.9f;
+
+    public static final int NUM_PARTICLES = 20_000_000;
+    private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
-    private static final float PULL_FORCE = 200f;
-    private static final FloatVector MIN_DIST_SQ_VEC = FloatVector.broadcast(F_SPECIES, 1.0f);
-    private static final float FRICTION = 0.9f;
+    private final ExecutorService executorService = Executors.newFixedThreadPool(CPU_COUNT);
+    private final ParticleUpdateTask[] tasks = new ParticleUpdateTask[CPU_COUNT];
 
-    private static final int NUM_PARTICLES = 20_000_000;
-
-    private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
-
-    private float[] positionsX = new float[NUM_PARTICLES];
-    private float[] positionsY = new float[NUM_PARTICLES];
-    private float[] velocitiesX = new float[NUM_PARTICLES];
-    private float[] velocitiesY = new float[NUM_PARTICLES];
-    private float[] startX = new float[NUM_PARTICLES];
-    private float[] startY = new float[NUM_PARTICLES];
-    private int[] colors = new int[NUM_PARTICLES];
+    public float[] positionsX = new float[NUM_PARTICLES];
+    public float[] positionsY = new float[NUM_PARTICLES];
+    public float[] velocitiesX = new float[NUM_PARTICLES];
+    public float[] velocitiesY = new float[NUM_PARTICLES];
+    // private float[] startX = new float[NUM_PARTICLES];
+    // private float[] startY = new float[NUM_PARTICLES];
+    public int[] colors = new int[NUM_PARTICLES];
 
     private BufferedImage image;
     // private byte[] pixelArray;
     private int width;
     private int height;
     // private byte[][] threadPixelBuffers;
-    private int[][] threadPixelBuffers;
+    public int[][] threadPixelBuffers;
 
-    private Point mousePosition = new Point(0, 0);
-    private boolean isMousePressed = false;
+    public Point mousePosition = new Point(0, 0);
+    public boolean isMousePressed = false;
 
     private volatile boolean running = false;
     private Thread gameLoopThread;
@@ -100,6 +108,13 @@ class ParticlePanel extends JPanel
         setSize(width, height);
         setPreferredSize(new Dimension(width, height));
         this.handleResize(width, height);
+
+        // create tasks
+        var i = 0;
+        while (i < CPU_COUNT) {
+            tasks[i] = new ParticleUpdateTask();
+            i++;
+        }
 
         placeParticlesSquare();
         addMouseListener(this);
@@ -153,14 +168,15 @@ class ParticlePanel extends JPanel
 
                 long renderStart = System.nanoTime();
                 render();
-                long renderEnd = System.nanoTime();
-                long renderDuration = (renderEnd - renderStart);
 
-                Graphics g = getGraphics();
+                Graphics2D g = (Graphics2D) getGraphics();
                 g.drawImage(image, 0, 0, this);
                 g.dispose();
                 Toolkit.getDefaultToolkit().sync();
                 frames++;
+
+                long renderEnd = System.nanoTime();
+                long renderDuration = (renderEnd - renderStart);
 
                 if (frames % TARGET_FPS == 0) {
                     float tickDurationMs = tickDuration / 1_000_000.0f;
@@ -184,121 +200,25 @@ class ParticlePanel extends JPanel
     private void tick(float deltaTime) {
         final int w = this.width;
         final int h = this.height;
-        final float wFloat = (float) w;
-        final float hFloat = (float) h;
 
-        final FloatVector W_VEC = FloatVector.broadcast(F_SPECIES, wFloat);
-        final FloatVector H_VEC = FloatVector.broadcast(F_SPECIES, hFloat);
-        final FloatVector ZERO_VEC = FloatVector.broadcast(F_SPECIES, 0.0f);
-        final FloatVector MOUSE_X_VEC = FloatVector.broadcast(F_SPECIES, (float) mousePosition.x);
-        final FloatVector MOUSE_Y_VEC = FloatVector.broadcast(F_SPECIES, (float) mousePosition.y);
-        final FloatVector MIN_DIST_RETURN_VEC = FloatVector.broadcast(F_SPECIES, 0.5f);
-        final float gf = PULL_FORCE * deltaTime;
-        final float frictionScalar = (float) Math.pow(FRICTION, deltaTime);
-        final FloatVector FRICTION_DT_VEC = FloatVector.broadcast(F_SPECIES, frictionScalar);
-        final boolean mouseIsPressed = isMousePressed;
+        final int vectorizedEndIndex = (NUM_PARTICLES / LANE_SIZE) * LANE_SIZE;
+        final int chunkSize = vectorizedEndIndex / CPU_COUNT;
+        final var futures = new ArrayList<Future<?>>(CPU_COUNT);
 
-        final int VECTOR_CHUNKS = NUM_PARTICLES / LANE_SIZE;
-        final int SCALAR_START_INDEX = VECTOR_CHUNKS * LANE_SIZE;
+        for (int i = 0; i < CPU_COUNT; i++) {
+            int start = i * chunkSize;
+            int end = (i == CPU_COUNT - 1) ? vectorizedEndIndex : start + chunkSize;
+            ParticleUpdateTask task = tasks[i];
+            task.updateParams(i, start, end, this, deltaTime);
+            futures.add(executorService.submit(task));
+        }
 
-        IntStream.range(0, VECTOR_CHUNKS).parallel().forEach(chunkIndex -> {
-            int i = chunkIndex * LANE_SIZE;
-            FloatVector px = FloatVector.fromArray(F_SPECIES, positionsX, i);
-            FloatVector py = FloatVector.fromArray(F_SPECIES, positionsY, i);
-            FloatVector vx = FloatVector.fromArray(F_SPECIES, velocitiesX, i);
-            FloatVector vy = FloatVector.fromArray(F_SPECIES, velocitiesY, i);
-
-            if (mouseIsPressed) {
-                FloatVector dx = MOUSE_X_VEC.sub(px);
-                FloatVector dy = MOUSE_Y_VEC.sub(py);
-                FloatVector distSq = dx.mul(dx).add(dy.mul(dy));
-                var gravityMask = distSq.compare(GT, MIN_DIST_SQ_VEC);
-
-                if (gravityMask.anyTrue()) {
-                    FloatVector dist = distSq.sqrt();
-                    FloatVector forceX = dx.div(dist).mul(gf);
-                    FloatVector forceY = dy.div(dist).mul(gf);
-                    vx = vx.add(forceX, gravityMask);
-                    vy = vy.add(forceY, gravityMask);
-                }
+        for (Future<?> future : futures) {
+            try {
+                future.get();
+            } catch (InterruptedException | ExecutionException e) {
+                e.printStackTrace();
             }
-
-            if (shouldReturnToStart) {
-                FloatVector sx = FloatVector.fromArray(F_SPECIES, startX, i);
-                FloatVector sy = FloatVector.fromArray(F_SPECIES, startY, i);
-                FloatVector dx = sx.sub(px);
-                FloatVector dy = sy.sub(py);
-                FloatVector distSq = dx.mul(dx).add(dy.mul(dy));
-                var distMask = distSq.compare(GT, MIN_DIST_RETURN_VEC);
-
-                if (distMask.anyTrue()) {
-                    FloatVector dist = distSq.sqrt();
-                    FloatVector forceX = dx.div(dist).mul(2f);
-                    FloatVector forceY = dy.div(dist).mul(2f);
-                    vx = vx.add(forceX, distMask);
-                    vy = vy.add(forceY, distMask);
-                }
-
-            }
-
-            px = px.add(vx.mul(deltaTime));
-            py = py.add(vy.mul(deltaTime));
-            vx = vx.mul(FRICTION_DT_VEC);
-            vy = vy.mul(FRICTION_DT_VEC);
-
-            // var maskLeftX = px.compare(LT, ZERO_VEC);
-            // var maskRightX = px.compare(GT, W_VEC);
-            // var maskBounceX = maskLeftX.or(maskRightX);
-
-            // vx = vx.blend(vx.mul(BOUNCE_MULTIPLIER_VEC), maskBounceX);
-
-            // px = px.blend(ZERO_VEC, maskLeftX);
-            // px = px.blend(W_VEC, maskRightX);
-
-            // var maskTopY = py.compare(LT, ZERO_VEC);
-            // var maskBottomY = py.compare(GT, H_VEC);
-            // var maskBounceY = maskTopY.or(maskBottomY);
-
-            // vy = vy.blend(vy.mul(BOUNCE_MULTIPLIER_VEC), maskBounceY);
-
-            // py = py.blend(ZERO_VEC, maskTopY);
-            // py = py.blend(H_VEC, maskBottomY);
-
-            px.intoArray(positionsX, i);
-            py.intoArray(positionsY, i);
-            vx.intoArray(velocitiesX, i);
-            vy.intoArray(velocitiesY, i);
-        });
-
-        for (int i = SCALAR_START_INDEX; i < NUM_PARTICLES; i++) {
-            float px = positionsX[i];
-            float py = positionsY[i];
-            float vx = velocitiesX[i];
-            float vy = velocitiesY[i];
-
-            if (mouseIsPressed) {
-                float dx = (float) mousePosition.x - px;
-                float dy = (float) mousePosition.y - py;
-                float distSq = dx * dx + dy * dy;
-
-                if (distSq > 1.0f) {
-                    float dist = (float) Math.sqrt(distSq);
-                    float forceX = (dx / dist) * gf;
-                    float forceY = (dy / dist) * gf;
-                    vx += forceX;
-                    vy += forceY;
-                }
-            }
-
-            vx *= frictionScalar;
-            vy *= frictionScalar;
-            px += vx * deltaTime;
-            py += vy * deltaTime;
-
-            positionsX[i] = px;
-            positionsY[i] = py;
-            velocitiesX[i] = vx;
-            velocitiesY[i] = vy;
         }
     }
 
@@ -310,30 +230,30 @@ class ParticlePanel extends JPanel
         final int PARTICLES_PER_CHUNK = NUM_PARTICLES / CPU_COUNT;
         int[] buff = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
         Arrays.fill(buff, 0);
-        IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
-            int[] localPixelArray = threadPixelBuffers[chunkIndex];
-            int max = localPixelArray.length - 1;
-            Arrays.fill(localPixelArray, empty);
-            int start = chunkIndex * PARTICLES_PER_CHUNK;
-            int end = (chunkIndex == CPU_COUNT - 1) ? NUM_PARTICLES
-                    : start +
-                            PARTICLES_PER_CHUNK;
+        // IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
+        // int[] localPixelArray = threadPixelBuffers[chunkIndex];
+        // int max = localPixelArray.length - 1;
+        // Arrays.fill(localPixelArray, empty);
+        // int start = chunkIndex * PARTICLES_PER_CHUNK;
+        // int end = (chunkIndex == CPU_COUNT - 1) ? NUM_PARTICLES
+        // : start +
+        // PARTICLES_PER_CHUNK;
 
-            for (int i = start; i < end; i++) {
-                int px = (int) Math.min(Math.max(positionsX[i], 0), w - 1);
-                int py = (int) Math.min(Math.max(positionsY[i], 0), h - 1);
-                int index = py * w + px;
-                localPixelArray[index] = colors[i];
+        // for (int i = start; i < end; i++) {
+        // int px = (int) Math.min(Math.max(positionsX[i], 0), w - 1);
+        // int py = (int) Math.min(Math.max(positionsY[i], 0), h - 1);
+        // int index = py * w + px;
+        // localPixelArray[index] = colors[i];
 
-                // if (px >= 0 && px < w && py >= 0 && py < h) {
-                // int lu = localPixelArray[index] & 0xFF;
-                // lu = Math.min(255, lu + 20);
-                // localPixelArray[index] = (byte) lu;
-                // buff[index] = colors[i];
-                // localPixelArray[Math.max(0, Math.min(max, index))] = colors[i];
-                // }
-            }
-        });
+        // // if (px >= 0 && px < w && py >= 0 && py < h) {
+        // // int lu = localPixelArray[index] & 0xFF;
+        // // lu = Math.min(255, lu + 20);
+        // // localPixelArray[index] = (byte) lu;
+        // // buff[index] = colors[i];
+        // // localPixelArray[Math.max(0, Math.min(max, index))] = colors[i];
+        // // }
+        // }
+        // });
 
         final int PIXEL_COUNT = buff.length;
         IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
@@ -404,8 +324,8 @@ class ParticlePanel extends JPanel
             for (int i = 0; i < NUM_PARTICLES; i++) {
                 positionsX[i] -= last.x;
                 positionsY[i] -= last.y;
-                startX[i] -= last.x;
-                startY[i] -= last.y;
+                // startX[i] -= last.x;
+                // startY[i] -= last.y;
             }
         }
 
@@ -546,8 +466,8 @@ class ParticlePanel extends JPanel
         for (int i = 0; i < NUM_PARTICLES; i++) {
             positionsX[i] = (float) this.width * fastRandomFloat();
             positionsY[i] = (float) this.height * fastRandomFloat();
-            startX[i] = positionsX[i];
-            startY[i] = positionsY[i];
+            // startX[i] = positionsX[i];
+            // startY[i] = positionsY[i];
             velocitiesX[i] = 0;
             velocitiesY[i] = 0;
 
@@ -576,8 +496,8 @@ class ParticlePanel extends JPanel
             var sinA = (float) Math.sin(angle);
             positionsX[i] = cosA * d + centerX;
             positionsY[i] = sinA * d + centerY;
-            startX[i] = positionsX[i];
-            startY[i] = positionsY[i];
+            // startX[i] = positionsX[i];
+            // startY[i] = positionsY[i];
             velocitiesX[i] = 0;
             velocitiesY[i] = 0;
 
@@ -660,8 +580,8 @@ class ParticlePanel extends JPanel
                                 int sourceIndex = i % particlesToUseBase;
                                 positionsX[i] = baseX[sourceIndex];
                                 positionsY[i] = baseY[sourceIndex];
-                                startX[i] = baseX[sourceIndex];
-                                startY[i] = baseY[sourceIndex];
+                                // startX[i] = baseX[sourceIndex];
+                                // startY[i] = baseY[sourceIndex];
                                 velocitiesX[i] = 0;
                                 velocitiesY[i] = 0;
                                 colors[i] = baseColors[sourceIndex];
@@ -707,8 +627,8 @@ class ParticlePanel extends JPanel
         for (int i = 0; i < NUM_PARTICLES; i++) {
             positionsX[i] = (float) this.width * fastRandomFloat();
             positionsY[i] = (float) this.height * fastRandomFloat();
-            startX[i] = positionsX[i];
-            startY[i] = positionsY[i];
+            // startX[i] = positionsX[i];
+            // startY[i] = positionsY[i];
             velocitiesX[i] = 0;
             velocitiesY[i] = 0;
 
@@ -734,6 +654,124 @@ class ParticlePanel extends JPanel
             float finalB = (float) (blendedB / totalWeight);
 
             colors[i] = calculateOklabColor(L_CONSTANT, finalA, finalB);
+        }
+    }
+}
+
+class ParticleUpdateTask implements Runnable {
+    private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
+    private static final VectorSpecies<Integer> I_SPECIES = VectorSpecies.of(int.class, F_SPECIES.vectorShape());
+
+    private static final int LANE_SIZE = F_SPECIES.length();
+
+    private int startIndex;
+    private int endIndex;
+    private ParticlePanel panel;
+    private float deltaTime;
+    private int id;
+
+    public ParticleUpdateTask() {
+    }
+
+    public void updateParams(int id, int start, int end, ParticlePanel panel, float deltaTime) {
+        this.startIndex = start;
+        this.endIndex = end;
+        this.panel = panel;
+        this.deltaTime = deltaTime;
+        this.id = id;
+    }
+
+    @Override
+    public void run() {
+        final float[] positionsX = panel.positionsX;
+        final float[] positionsY = panel.positionsY;
+        final float[] velocitiesX = panel.velocitiesX;
+        final float[] velocitiesY = panel.velocitiesY;
+        final int[] colors = panel.colors;
+        final int w = panel.getWidth();
+        final int h = panel.getHeight();
+
+        // Constants derived from ParticlePanel state
+        final FloatVector MOUSE_X_VEC = FloatVector.broadcast(F_SPECIES, (float) panel.mousePosition.x);
+        final FloatVector MOUSE_Y_VEC = FloatVector.broadcast(F_SPECIES, (float) panel.mousePosition.y);
+        float minPullDist = panel.MIN_PULL_DIST;
+        final float gf = panel.PULL_FORCE * deltaTime;
+        final float frictionScalar = (float) Math.pow(panel.FRICTION, deltaTime);
+        final FloatVector FRICTION_DT_VEC = FloatVector.broadcast(F_SPECIES, frictionScalar);
+        final boolean mouseIsPressed = panel.isMousePressed;
+
+        final int vectorEndIndex = startIndex + ((endIndex - startIndex) / LANE_SIZE) * LANE_SIZE;
+
+        for (int i = startIndex; i < vectorEndIndex; i += LANE_SIZE) {
+            FloatVector px = FloatVector.fromArray(F_SPECIES, positionsX, i);
+            FloatVector py = FloatVector.fromArray(F_SPECIES, positionsY, i);
+            FloatVector vx = FloatVector.fromArray(F_SPECIES, velocitiesX, i);
+            FloatVector vy = FloatVector.fromArray(F_SPECIES, velocitiesY, i);
+
+            if (mouseIsPressed) {
+                FloatVector dx = MOUSE_X_VEC.sub(px);
+                FloatVector dy = MOUSE_Y_VEC.sub(py);
+                FloatVector distSq = dx.mul(dx).add(dy.mul(dy));
+                var gravityMask = distSq.compare(GT, minPullDist);
+
+                if (gravityMask.anyTrue()) {
+                    FloatVector dist = distSq.sqrt();
+                    FloatVector forceX = dx.div(dist).mul(gf);
+                    FloatVector forceY = dy.div(dist).mul(gf);
+                    vx = vx.add(forceX, gravityMask);
+                    vy = vy.add(forceY, gravityMask);
+                }
+            }
+
+            px = px.add(vx.mul(deltaTime));
+            py = py.add(vy.mul(deltaTime));
+            vx = vx.mul(FRICTION_DT_VEC);
+            vy = vy.mul(FRICTION_DT_VEC);
+
+            px.intoArray(positionsX, i);
+            py.intoArray(positionsY, i);
+            vx.intoArray(velocitiesX, i);
+            vy.intoArray(velocitiesY, i);
+        }
+
+        for (int i = vectorEndIndex; i < endIndex; i++) {
+            float px = positionsX[i];
+            float py = positionsY[i];
+            float vx = velocitiesX[i];
+            float vy = velocitiesY[i];
+
+            if (mouseIsPressed) {
+                float dx = (float) MOUSE_X_VEC.lane(0) - px;
+                float dy = (float) MOUSE_Y_VEC.lane(0) - py;
+                float distSq = dx * dx + dy * dy;
+
+                if (distSq > 1.0f) {
+                    float dist = (float) Math.sqrt(distSq);
+                    float forceX = (dx / dist) * gf;
+                    float forceY = (dy / dist) * gf;
+                    vx += forceX;
+                    vy += forceY;
+                }
+            }
+
+            vx *= frictionScalar;
+            vy *= frictionScalar;
+            px += vx * deltaTime;
+            py += vy * deltaTime;
+
+            positionsX[i] = px;
+            positionsY[i] = py;
+            velocitiesX[i] = vx;
+            velocitiesY[i] = vy;
+        }
+
+        var pixels = panel.threadPixelBuffers[id];
+        Arrays.fill(pixels, 0);
+        for (int i = startIndex; i < endIndex; i++) {
+            int px = (int) Math.min(Math.max(positionsX[i], 0), w - 1);
+            int py = (int) Math.min(Math.max(positionsY[i], 0), h - 1);
+            int index = py * w + px;
+            pixels[index] = colors[i];
         }
     }
 }
