@@ -1,4 +1,4 @@
-# start
+# Start
 
 A particle simulation app leveraging java's incubator vector api. 
 
@@ -9,7 +9,7 @@ Features simulating tens of millions of particles depending on cpu up to hundred
 * Press space to slow down particles
 * Pan with right click
 
-## build
+## Build
 
 Building requires enabling the incubator vector api like so.
 

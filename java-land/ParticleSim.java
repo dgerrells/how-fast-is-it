@@ -61,7 +61,7 @@ class ParticlePanel extends JPanel
     public final float MIN_PULL_DIST = 1.0f;
     public final float FRICTION = 0.9f;
 
-    public static final int NUM_PARTICLES = 20_000_000;
+    public static final int NUM_PARTICLES = 100_000_000;
     private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
@@ -76,7 +76,7 @@ class ParticlePanel extends JPanel
     // private float[] startY = new float[NUM_PARTICLES];
     public int[] colors = new int[NUM_PARTICLES];
 
-    private BufferedImage image;
+    public BufferedImage image;
     // private byte[] pixelArray;
     private int width;
     private int height;

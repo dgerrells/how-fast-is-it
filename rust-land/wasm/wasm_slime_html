@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en" style="user-select: none">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sabby Rust</title>
+    <link rel="icon" href="./favicon.ico" type="image/x-icon" />
+    <style>
+      body,
+      html,
+      div,
+      canvas {
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -webkit-touch-callout: none;
+        -ms-user-select: none;
+        user-select: none;
+        outline: none;
+      }
+    </style>
+  </head>
+  <body
+    style="
+      margin: 0;
+      width: 100vw;
+      height: 100vh;
+      background: black;
+      -webkit-touch-callout: none;
+      overflow: hidden;
+    "
+  >
+    <div>
+      <canvas id="canvas"></canvas>
+    </div>
+    <script type="module">
+      import init, { ParticleSimulator } from './how_fast_is_rust.js';
+
+      async function runSimulation() {
+        const instance = await init();
+
+        const canvas = document.getElementById('canvas');
+        canvas.style.touchAction = 'none';
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const ctx = canvas.getContext('2d');
+        let imageData = ctx.createImageData(canvas.width, canvas.height);
+        let frameBuffer = new Uint32Array(imageData.data.buffer);
+        
+        const simulator = new ParticleSimulator();
+        function resize() {
+          canvas.width = window.innerWidth;
+          canvas.height = window.innerHeight;
+          imageData = ctx.createImageData(canvas.width, canvas.height);
+          frameBuffer = new Uint32Array(imageData.data.buffer);
+          simulator.init(canvas.width, canvas.height, 50000, 0, 14, 5.5, 1, 80);
+        }
+        resize();
+
+        let mousePressed = false;
+        let mouseX = canvas.width / 2;
+        let mouseY = canvas.height / 2;
+
+        window.addEventListener('resize', resize);
+        window.addEventListener('mousedown', () => mousePressed = true);
+        window.addEventListener('mouseup', () => mousePressed = false);
+        window.addEventListener('mousemove', (event) => {
+            mouseX = event.offsetX;
+            mouseY = event.offsetY;
+        });
+        window.addEventListener('touchend', (event) => {
+          mousePressed = false;
+        });
+
+        window.addEventListener('touchmove', (event) => {
+          mousePressed = true;
+          mouseX = event.touches[0].clientX;
+          mouseY = event.touches[0].clientY;
+        });
+        window.addEventListener('touchstart', (event) => {
+          event.preventDefault();
+          mousePressed = true;
+          mouseX = event.touches[0].clientX;
+          mouseY = event.touches[0].clientY;
+        });
+
+
+        let prev = 0;
+        function render(timestamp = 0) {
+          const dt = (timestamp - prev)/1000;
+          prev = timestamp;
+          const frame_buff_ptr = simulator.simulate(mouseX, mouseY, mousePressed, 0.016);
+          const buff = new Uint8Array(instance.memory.buffer, frame_buff_ptr, canvas.width * canvas.height*4);
+          for(let i = 0; i < frameBuffer.length;i++) {
+            const r = buff[i*4];
+            const g = buff[i*4+1];
+            const b = buff[i*4+2];
+            const a = buff[i*4+3];
+            frameBuffer[i] = (r << 24) | (g << 16) | (b << 8) | a;
+          }
+          ctx.putImageData(imageData, 0, 0);
+          // ctx.scale(2,2);
+          ctx.drawImage(canvas, 0, 0);
+          requestAnimationFrame(render);
+        }
+        render();
+      }
+      runSimulation().catch(e => console.error("Could not run simulation:", e));
+    </script>
+  </body>
+</html>

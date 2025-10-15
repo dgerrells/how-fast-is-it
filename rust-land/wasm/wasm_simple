@@ -1,0 +1,148 @@
+#![no_main]
+use rand::Rng;
+use wasm_bindgen::prelude::*;
+
+#[repr(align(16))]
+struct Particle {
+    x: f32,
+    y: f32,
+    // sx: f32,
+    // sy: f32,
+    dx: f32,
+    dy: f32,
+}
+
+static mut PARTICLES: Vec<Particle> = Vec::new();
+static mut BUFFER: Vec<u32> = Vec::new();
+static mut WIDTH: usize = 1;
+static mut HEIGHT: usize = 1;
+static mut GRAVITY_STRENGTH: f32 = 205.5 * 6.0;
+
+#[wasm_bindgen]
+pub struct TickInput {
+    pub dt: f32,
+    pub touch_x: f32,
+    pub touch_y: f32,
+    pub is_touch_down: bool,
+}
+
+#[wasm_bindgen]
+impl TickInput {
+    #[wasm_bindgen(constructor)]
+    pub fn new(dt: f32, touch_x: f32, touch_y: f32, is_touch_down: bool) -> TickInput {
+        TickInput { dt, touch_x, touch_y, is_touch_down }
+    }
+}
+
+fn generate_particles(count: usize, width: usize, height: usize) -> Vec<Particle> {
+    let mut rng = rand::thread_rng();
+    let mut particles = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let x = rng.gen_range(0.0..width as f32);
+        let y = rng.gen_range(0.0..height as f32);
+        particles.push(Particle {
+            x,
+            y,
+            // sx: x,
+            // sy: y,
+            dx: rng.gen_range(-1.0..1.0),
+            dy: rng.gen_range(-1.0..1.0),
+        });
+    }
+
+    particles
+}
+
+#[wasm_bindgen]
+pub struct InitInput {
+    pub width: usize,
+    pub height: usize,
+    pub particle_count: usize,
+    pub gravity: f32,
+}
+
+#[wasm_bindgen]
+impl InitInput {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: usize, height: usize, particle_count: usize, gravity: f32) -> InitInput {
+        InitInput { width, height, particle_count, gravity }
+    }
+}
+
+#[wasm_bindgen]
+pub fn init(input: InitInput) {
+    unsafe {
+        WIDTH = input.width;
+        HEIGHT = input.height;
+        if PARTICLES.len() != input.particle_count {
+            PARTICLES = generate_particles(input.particle_count, WIDTH, HEIGHT);
+        }
+        BUFFER = vec![0; WIDTH * HEIGHT];
+    }
+}
+
+#[wasm_bindgen]
+pub fn tick(input: TickInput) -> *const u32 {
+    let friction_per_second = 0.985_f32.powf(60.0);
+    let dt = input.dt;
+    let touch_x = input.touch_x;
+    let touch_y = input.touch_y;
+    let is_touch_down = input.is_touch_down;
+    unsafe {
+        for particle in PARTICLES.iter_mut() {
+            if is_touch_down {
+                let dx = touch_x - particle.x;
+                let dy = touch_y - particle.y;
+                let distance = (dx * dx + dy * dy).sqrt();
+
+                if distance > 0.2 {
+                    let inv_gravity = GRAVITY_STRENGTH / distance;
+                    particle.dx += dx * inv_gravity * dt;
+                    particle.dy += dy * inv_gravity * dt;
+                }
+            }
+            // let dx = particle.sx - particle.x;
+            // let dy = particle.sy - particle.y;
+            // let distance = (dx * dx + dy * dy).sqrt();
+            // if distance > 4.0 {
+            //     let mut inv_gravity = 200.0 / distance;
+            //     if distance > 16.0 {
+            //         inv_gravity *= 2.5;
+            //     }
+            //     particle.dx += dx * inv_gravity * dt;
+            //     particle.dy += dy * inv_gravity * dt;
+            // }
+            // if distance > 30.0 {
+            //     let inv_gravity = 2_000.0 / distance;
+            //     particle.dx += dx * inv_gravity * dt;
+            //     particle.dy += dy * inv_gravity * dt;
+            // }
+
+            let friction = friction_per_second.powf(dt);
+            particle.dx *= friction;
+            particle.dy *= friction;
+            particle.x += particle.dx * dt;
+            particle.y += particle.dy * dt;
+        }
+
+        BUFFER.iter_mut().for_each(|pixel| *pixel = 0);
+        for particle in &PARTICLES {
+            let x = particle.x as usize;
+            let y = particle.y as usize;
+            let idx = y.max(0).min(HEIGHT-1) * WIDTH + x.max(0).min(WIDTH-1);
+            
+            let old_c =  BUFFER[idx];
+            let r = (old_c >> 24) & 0xFF;
+            let g = (old_c >> 16) & 0xFF;
+            let b = (old_c >> 8) & 0xFF;
+            let red = r + (particle.y / HEIGHT as f32 * 255.0 * 0.5) as u32;
+            let green = g + (particle.x / WIDTH as f32 * 255.0 * 0.5) as u32;
+            let blue = b + (255.0 * 0.8) as u32;
+            let color = (red.min(255) << 24) | (green.min(255) << 16) | (blue.min(255) << 8) | 255;
+            BUFFER[idx] = color;
+        }
+
+        BUFFER.as_ptr()
+    }
+}

@@ -1,0 +1,263 @@
+#![no_main]
+use wasm_bindgen::prelude::*;
+use rand::Rng;
+use std::f32::consts::PI;
+
+const GRAVITY_STRENGTH: f32 = 105.0;
+
+#[repr(align(16))]
+struct Particle {
+    x: f32,
+    y: f32,
+    angle: f32,
+    speed: f32,
+    _type: u8,
+}
+
+#[wasm_bindgen]
+pub struct ParticleSimulator {
+    width: usize,
+    height: usize,
+    particles: Vec<Particle>,
+    frame_buff: Vec<u32>,
+    trail_buff: Vec<f32>,
+    rng: rand::rngs::ThreadRng,
+    options: SimulationOptions,
+}
+
+#[wasm_bindgen]
+pub struct SimulationOptions {
+    particle_count: usize,
+    blur_size: isize,
+    deposition: f32,
+    sense_dist: f32,
+    sense_angle: f32,
+    rotate_angle_dist: f32,
+    rotation_speed: f32,
+    sensor_size: i32,
+    diffusion_rate: f32,
+}
+
+#[wasm_bindgen]
+impl ParticleSimulator {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        utils::set_panic_hook();
+        let options = SimulationOptions {
+            particle_count: 80_000,
+            blur_size: 1,
+            deposition: 3.0,
+            sense_dist: 20.0,
+            sense_angle: PI / 180.0 * 15.0,
+            rotate_angle_dist: PI / 180.0 * 12.0,
+            rotation_speed: 4.0,
+            sensor_size: 1,
+            diffusion_rate: 24.0,
+        };
+        
+        let rng = rand::thread_rng();
+        ParticleSimulator {
+            width: 0,
+            height: 0,
+            particles: Vec::with_capacity(options.particle_count),
+            frame_buff: vec![0; 1],
+            trail_buff: vec![0.0; 1],
+            rng,
+            options,
+        }
+    }
+
+    #[no_mangle]
+    pub fn init(&mut self, width: usize, height: usize, particle_count: usize, blur_size: isize, diffusion_rate: f32, deposition: f32 , sense_size: i32, speed: f32) {
+        self.width = width;
+        self.height = height;
+        self.options.particle_count = particle_count;
+        self.options.blur_size = blur_size;
+        self.options.sensor_size = sense_size;
+        self.options.diffusion_rate = diffusion_rate;
+        self.options.deposition = deposition;
+        self.particles.clear();
+        self.particles.reserve(particle_count);
+        self.frame_buff = vec![0; width * height];
+        self.trail_buff = vec![0.0; width * height];
+
+        let spawn_width = self.width/4;
+        let spawn_height = self.height/4;
+
+        for _ in 0..particle_count {
+            self.particles.push(Particle {
+                x: self.rng.gen_range((self.width / 2 - spawn_width / 2) as f32..(self.width/2 + spawn_width/2) as f32),
+                y: self.rng.gen_range((self.height / 2 - spawn_height / 2) as f32..(self.height/2 + spawn_height/2) as f32),
+                angle: self.rng.gen_range(0.0..360.0) * PI / 180.0,
+                speed: speed + self.rng.gen_range(0.0..10.0),
+                _type: self.rng.gen_range(0..80),
+            });
+        }
+    }
+
+    #[no_mangle]
+    pub fn simulate(&mut self, mouse_x: f32, mouse_y: f32, mouse_pressed: bool, delta_time: f64) -> *const u32 {
+        let dt = delta_time as f32;
+        for p in self.particles.iter_mut() {
+            let mut nx = p.x + p.speed * p.angle.cos() * dt;
+            let mut ny = p.y + p.speed * p.angle.sin() * dt;
+
+            if mouse_pressed {
+                let dx = mouse_x - nx;
+                let dy = mouse_y - ny;
+                let dist = (dx*dx + dy*dy).sqrt();
+                if dist < 80.0 {
+                    nx -= dx * GRAVITY_STRENGTH/dist * dt * 1.5;
+                    ny -= dy * GRAVITY_STRENGTH/dist * dt * 1.5;
+                    p.angle *= -1.0;
+                }
+                nx += dx * GRAVITY_STRENGTH/dist * dt * 0.25;
+                ny += dy * GRAVITY_STRENGTH/dist * dt * 0.25;
+            }
+
+            if nx <= 0.0 || nx >= self.width as f32 || ny <= 0.0 || ny >= self.height as f32 {
+                p.angle = self.rng.gen_range(-1.0..1.0) * 2.0 * PI;
+                continue;
+            }
+
+            p.x = nx;
+            p.y = ny;
+
+            if p._type <= 3 {
+                self.trail_buff[p.y as usize * self.width + p.x as usize] -= self.options.deposition * dt;
+            } else if p._type == 4 {
+                self.trail_buff[p.y as usize * self.width + p.x as usize] -= self.options.deposition * dt * 1.30;
+            } else {
+                self.trail_buff[p.y as usize * self.width + p.x as usize] += self.options.deposition * dt;
+            }
+
+            let front = sense(p, &self.trail_buff, 0.0, self.options.sense_dist, self.options.sensor_size, self.width, self.height);
+            let left = sense(p, &self.trail_buff, -self.options.sense_angle, self.options.sense_dist, self.options.sensor_size, self.width, self.height);
+            let right = sense(p, &self.trail_buff, self.options.sense_angle, self.options.sense_dist, self.options.sensor_size, self.width, self.height);
+            // let front: f32 = 0.0;
+            // let left: f32 = 0.0;
+            // let right: f32 = 0.0;
+
+            if front > left && front > right {
+                continue;
+            }
+            if front < left && front < right {
+                if self.rng.gen_range(0.0..1.0) > 0.5 {
+                    p.angle += self.options.rotate_angle_dist * self.options.rotation_speed * dt;
+                } else {
+                    p.angle -= self.options.rotate_angle_dist * self.options.rotation_speed * dt;
+                }
+                continue;
+            }
+
+            if left < right {
+                p.angle += self.options.rotate_angle_dist * self.options.rotation_speed * dt;
+            } else {
+                p.angle -= self.options.rotate_angle_dist * self.options.rotation_speed * dt;
+            }
+        }
+
+        self.diffuse(self.options.diffusion_rate, dt, self.options.blur_size);
+
+        self.frame_buff.iter_mut().for_each(|pixel| *pixel = 0);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let index = y * self.width + x;
+                let trail_intensity = self.trail_buff[index];
+                let intensity_byte = (trail_intensity * 255.0).min(255.0).max(0.0) as f32;
+                let sx = x as f32 / self.width as f32;
+                let sy = y as f32 / self.height as f32;
+                let r = (intensity_byte*sx) as u32;
+                let g = (intensity_byte*sy) as u32;
+                let b = (intensity_byte*(1.0-sx)) as u32;
+                let packed_pixel = (r << 24) | (g << 16) | (b << 8 ) | 255;
+                self.frame_buff[index] = packed_pixel;
+            }
+        }
+
+        for particle in self.particles.iter() {
+            let x = particle.x as usize;
+            let y = particle.y as usize;
+
+            if x < self.width && y < self.height && x > 0 && y > 0 {
+                let sx = x as f32 / self.width as f32;
+                let sy = y as f32 / self.height as f32;
+                let red = (sx * 255.0 * 0.15) as u8;
+                let green = (sy * 255.0 * 0.15) as u8;
+                let blue = (255.0 * (1.0-sx) * 0.15) as u8;
+                let current_color = self.frame_buff[y * self.width + x];
+                let current_red = ((current_color >> 24) & 0xFFFFFF) as u8;
+                let current_green = ((current_color >> 16) & 0xFFFFFF) as u8;
+                let current_blue = ((current_color >> 8) & 0xFFFFFF) as u8;
+                let blended_red = current_red.saturating_add(red);
+                let blended_green = current_green.saturating_add(green);
+                let blended_blue =  current_blue.saturating_add(blue);
+                let blended_color: u32 = ((blended_red as u32) << 24) | ((blended_green as u32) << 16) | ((blended_blue as u32) << 8 ) | 255;
+                self.frame_buff[y * self.width + x] = blended_color;
+            }
+        }
+
+        self.frame_buff.as_ptr()
+    }
+
+    fn diffuse(&mut self, diffusion_rate: f32, dt: f32, blur_size: isize) {
+        let mut new_map = self.trail_buff.clone();
+        let df: f32 = dt * diffusion_rate;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let index = y * self.width + x;
+                let current_value = self.trail_buff[index];
+                let mut total_contribution = current_value;
+                let mut count = 1.0;
+                for dy in -blur_size..=blur_size {
+                    for dx in -blur_size..=blur_size {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+
+                        let nx = x as isize + dx;
+                        let ny = y as isize + dy;
+                        if nx >= 0 && nx < self.width as isize && ny >= 0 && ny < self.height as isize {
+                            let neighbor_index = ny as usize * self.width + nx as usize;
+                            total_contribution += self.trail_buff[neighbor_index];
+                            count += 1.0;
+                        }
+                    }
+                }
+                let new_value = (current_value + (df * (total_contribution / count))) * (1.0 - df);
+                new_map[index] = new_value;
+            }
+        }
+        for (i, val) in new_map.iter().enumerate() {
+            self.trail_buff[i] = *val;
+        }
+    }
+}
+
+mod utils {
+    pub fn set_panic_hook() {
+        // https://github.com/rustwasm/console_error_panic_hook#readme
+        #[cfg(feature = "console_error_panic_hook")]
+        {
+            console_error_panic_hook::set_once();
+        }
+    }
+}
+
+fn sense(p: &Particle, trail_buff: &Vec<f32>, angle_offset: f32, sense_dist: f32, sense_size: i32, width: usize, height: usize,) -> f32 {
+    let sensor_angle = p.angle + angle_offset;
+    let sense_x = p.x + sense_dist * sensor_angle.cos();
+    let sense_y = p.y + sense_dist * sensor_angle.sin();
+
+    let mut sum: f32 = 0.0;
+    for offset_x in -sense_size..sense_size {
+        for offset_y in -sense_size..sense_size {
+            let sample_x = (sense_x as i32 + offset_x).clamp(0, width as i32 - 1);
+            let sample_y = (sense_y as i32 + offset_y).clamp(0, height as i32 - 1);
+
+            sum += trail_buff[sample_y as usize * width + sample_x as usize];
+        }
+    }
+
+    sum
+}
