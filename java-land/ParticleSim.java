@@ -9,6 +9,7 @@ import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferInt;
 import java.io.File;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -16,6 +17,8 @@ import java.util.concurrent.Future;
 import java.util.stream.IntStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Map;
 
 import jdk.incubator.vector.ByteVector;
 import jdk.incubator.vector.FloatVector;
@@ -29,18 +32,15 @@ import static jdk.incubator.vector.VectorOperators.*;
 public class ParticleSim {
 
     public static void main(String[] args) {
-
-        SwingUtilities.invokeLater(() -> {
-            new ParticleSim().createAndShowGUI();
-        });
+        new ParticleSim().createAndShowGUI();
     }
 
     private void createAndShowGUI() {
         JFrame frame = new JFrame("Sips Java");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 
-        int width = 900;
-        int height = 680;
+        int width = 1200;
+        int height = 800;
 
         ParticlePanel particlePanel = new ParticlePanel(width, height);
         frame.add(particlePanel);
@@ -61,12 +61,18 @@ class ParticlePanel extends JPanel
     public final float MIN_PULL_DIST = 1.0f;
     public final float FRICTION = 0.9f;
 
-    public static final int NUM_PARTICLES = 100_000_000;
+    public static final int NUM_PARTICLES = 50_000_000;
     private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
     private final ExecutorService executorService = Executors.newFixedThreadPool(CPU_COUNT);
     private final ParticleUpdateTask[] tasks = new ParticleUpdateTask[CPU_COUNT];
+    private final Set<Character> keysPressed = new HashSet<>();
+    private Map<Character, Point> velInputMap = Map.of(
+            'a', new Point(1, 0),
+            'd', new Point(-1, 0),
+            's', new Point(0, -1),
+            'w', new Point(0, 1));
 
     public float[] positionsX = new float[NUM_PARTICLES];
     public float[] positionsY = new float[NUM_PARTICLES];
@@ -89,16 +95,19 @@ class ParticlePanel extends JPanel
     private volatile boolean running = false;
     private Thread gameLoopThread;
     private static final long NS_PER_SECOND = 1_000_000_000L;
-    private static final double TARGET_FPS = 60.0;
+    private static final double TARGET_FPS = 120.0;
     private static final double NS_PER_TICK = NS_PER_SECOND / TARGET_FPS;
     private boolean isResizeRequested = false;
     private boolean isResetRequested = false;
+    private boolean isSlowDownRequested = false;
     final int resetSquareType = 1;
     final int resetSquareMultiType = 2;
     final int resetCircleType = 3;
     final int resetImageType = 4;
     private int resetType = 0;
     private boolean isPanning = false;
+    public volatile Point panDeltaInput = new Point(0, 0);
+    public volatile float inputVelScale = 0.2f;
     private boolean shouldReturnToStart = false;
 
     private long lastTickTime;
@@ -161,6 +170,14 @@ class ParticlePanel extends JPanel
                 float deltaTime = timeElapsed / (float) NS_PER_SECOND;
                 lastTickTime = now;
 
+                for (var key : this.keysPressed) {
+                    float speed = 500;
+                    if (this.velInputMap.containsKey(key)) {
+                        this.panDeltaInput.x += velInputMap.get(key).x * speed * deltaTime;
+                        this.panDeltaInput.y += velInputMap.get(key).y * speed * deltaTime;
+                    }
+                }
+
                 long tickStart = System.nanoTime();
                 tick(deltaTime);
                 long tickEnd = System.nanoTime();
@@ -205,13 +222,24 @@ class ParticlePanel extends JPanel
         final int chunkSize = vectorizedEndIndex / CPU_COUNT;
         final var futures = new ArrayList<Future<?>>(CPU_COUNT);
 
+        // safe input data
+        final int panDx = this.panDeltaInput.x;
+        final int panDy = this.panDeltaInput.y;
+        final float vScale = this.isSlowDownRequested ? this.inputVelScale : 0f;
+
+        // only reset if there was a change.
+        this.panDeltaInput.x = 0;
+        this.panDeltaInput.y = 0;
+
         for (int i = 0; i < CPU_COUNT; i++) {
             int start = i * chunkSize;
             int end = (i == CPU_COUNT - 1) ? vectorizedEndIndex : start + chunkSize;
             ParticleUpdateTask task = tasks[i];
-            task.updateParams(i, start, end, this, deltaTime);
+            task.updateParams(i, start, end, this, deltaTime, panDx, panDy, vScale);
             futures.add(executorService.submit(task));
         }
+
+        this.isSlowDownRequested = false;
 
         for (Future<?> future : futures) {
             try {
@@ -223,38 +251,8 @@ class ParticlePanel extends JPanel
     }
 
     private void render() {
-        final int w = this.width;
-        final int h = this.height;
-        final byte empty = (byte) 0;
-
-        final int PARTICLES_PER_CHUNK = NUM_PARTICLES / CPU_COUNT;
         int[] buff = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
         Arrays.fill(buff, 0);
-        // IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
-        // int[] localPixelArray = threadPixelBuffers[chunkIndex];
-        // int max = localPixelArray.length - 1;
-        // Arrays.fill(localPixelArray, empty);
-        // int start = chunkIndex * PARTICLES_PER_CHUNK;
-        // int end = (chunkIndex == CPU_COUNT - 1) ? NUM_PARTICLES
-        // : start +
-        // PARTICLES_PER_CHUNK;
-
-        // for (int i = start; i < end; i++) {
-        // int px = (int) Math.min(Math.max(positionsX[i], 0), w - 1);
-        // int py = (int) Math.min(Math.max(positionsY[i], 0), h - 1);
-        // int index = py * w + px;
-        // localPixelArray[index] = colors[i];
-
-        // // if (px >= 0 && px < w && py >= 0 && py < h) {
-        // // int lu = localPixelArray[index] & 0xFF;
-        // // lu = Math.min(255, lu + 20);
-        // // localPixelArray[index] = (byte) lu;
-        // // buff[index] = colors[i];
-        // // localPixelArray[Math.max(0, Math.min(max, index))] = colors[i];
-        // // }
-        // }
-        // });
-
         final int PIXEL_COUNT = buff.length;
         IntStream.range(0, CPU_COUNT).parallel().forEach(chunkIndex -> {
             int chunkSize = PIXEL_COUNT / CPU_COUNT;
@@ -317,19 +315,15 @@ class ParticlePanel extends JPanel
 
     @Override
     public void mouseDragged(MouseEvent e) {
-        Point last = mousePosition;
+        Point current = e.getPoint();
         if (isPanning) {
-            last.x -= e.getPoint().x;
-            last.y -= e.getPoint().y;
-            for (int i = 0; i < NUM_PARTICLES; i++) {
-                positionsX[i] -= last.x;
-                positionsY[i] -= last.y;
-                // startX[i] -= last.x;
-                // startY[i] -= last.y;
-            }
+            int dx = current.x - mousePosition.x;
+            int dy = current.y - mousePosition.y;
+            panDeltaInput.x += dx;
+            panDeltaInput.y += dy;
         }
 
-        mousePosition = e.getPoint();
+        mousePosition = current;
     }
 
     @Override
@@ -422,10 +416,7 @@ class ParticlePanel extends JPanel
     @Override
     public void keyTyped(KeyEvent e) {
         if (e.getKeyChar() == ' ') {
-            for (int i = 0; i < NUM_PARTICLES; i++) {
-                velocitiesX[i] *= 0.2f;
-                velocitiesY[i] *= 0.2f;
-            }
+            this.isSlowDownRequested = true;
         }
         if (e.getKeyChar() == '2') {
             this.isResetRequested = true;
@@ -450,10 +441,12 @@ class ParticlePanel extends JPanel
 
     @Override
     public void keyPressed(KeyEvent e) {
+        keysPressed.add(e.getKeyChar());
     }
 
     @Override
     public void keyReleased(KeyEvent e) {
+        keysPressed.remove(e.getKeyChar());
     }
 
     private void placeParticlesSquare() {
@@ -518,84 +511,79 @@ class ParticlePanel extends JPanel
                 FileNameExtensionFilter filter = new FileNameExtensionFilter(
                         "Image Files (JPG, PNG, GIF)", "jpg", "jpeg", "png", "gif");
                 fileChooser.setFileFilter(filter);
-
-                // Use 'null' as the parent if 'this' is not available or if the method
-                // is not part of a visible component.
                 int userSelection = fileChooser.showOpenDialog(null);
 
-                if (userSelection == JFileChooser.APPROVE_OPTION) {
-                    File selectedFile = fileChooser.getSelectedFile();
+                if (userSelection != JFileChooser.APPROVE_OPTION) {
+                    return;
+                }
+                File selectedFile = fileChooser.getSelectedFile();
+                if (selectedFile == null || !selectedFile.exists()) {
+                    return;
+                }
 
-                    if (selectedFile != null && selectedFile.exists()) {
-                        try {
-                            BufferedImage sourceImage = ImageIO.read(selectedFile);
+                try {
+                    BufferedImage sourceImage = ImageIO.read(selectedFile);
+                    if (sourceImage == null) {
+                        JOptionPane.showMessageDialog(
+                                null,
+                                "Error: File is not a valid image format.",
+                                "Loading Error",
+                                JOptionPane.ERROR_MESSAGE);
+                        return;
+                    }
 
-                            // The original code checked 'if (image == null)'.
-                            // This uses 'sourceImage' which was just read.
-                            if (sourceImage == null) {
-                                JOptionPane.showMessageDialog(
-                                        null,
-                                        "Error: File is not a valid image format.",
-                                        "Loading Error",
-                                        JOptionPane.ERROR_MESSAGE);
-                                return;
-                            }
+                    final int N = NUM_PARTICLES;
+                    final int particleGridSide = (int) Math.floor(Math.sqrt(N));
+                    final int sourceW = sourceImage.getWidth();
+                    final int sourceH = sourceImage.getHeight();
 
-                            final int N = NUM_PARTICLES;
-                            final int particleGridSide = (int) Math.floor(Math.sqrt(N));
-                            final int sourceW = sourceImage.getWidth();
-                            final int sourceH = sourceImage.getHeight();
+                    float scaleFactorW = (float) particleGridSide / sourceW;
+                    float scaleFactorH = (float) particleGridSide / sourceH;
+                    float scaleFactor = Math.min(scaleFactorW, scaleFactorH);
+                    int scaledW = (int) (sourceW * scaleFactor);
+                    int scaledH = (int) (sourceH * scaleFactor);
 
-                            float scaleFactorW = (float) particleGridSide / sourceW;
-                            float scaleFactorH = (float) particleGridSide / sourceH;
-                            float scaleFactor = Math.min(scaleFactorW, scaleFactorH);
-                            int scaledW = (int) (sourceW * scaleFactor);
-                            int scaledH = (int) (sourceH * scaleFactor);
+                    final int pixelCount = scaledW * scaledH;
 
-                            final int particlesToUseBase = scaledW * scaledH;
+                    BufferedImage scaledImage = new BufferedImage(scaledW, scaledH, BufferedImage.TYPE_INT_RGB);
+                    Graphics2D g = scaledImage.createGraphics();
+                    g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                            RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+                    g.drawImage(sourceImage, 0, 0, scaledW, scaledH, null);
+                    g.dispose();
+                    final float centerImageX = (width - scaledW) / 2.0f;
+                    final float centerImageY = (height - scaledH) / 2.0f;
 
-                            BufferedImage scaledImage = new BufferedImage(scaledW, scaledH, BufferedImage.TYPE_INT_RGB);
-                            Graphics2D g = scaledImage.createGraphics();
-                            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
-                                    RenderingHints.VALUE_INTERPOLATION_BICUBIC);
-                            g.drawImage(sourceImage, 0, 0, scaledW, scaledH, null);
-                            g.dispose();
-                            int[] baseColors = new int[particlesToUseBase];
-                            float[] baseX = new float[particlesToUseBase];
-                            float[] baseY = new float[particlesToUseBase];
-                            final float centerImageX = (width - scaledW) / 2.0f;
-                            final float centerImageY = (height - scaledH) / 2.0f;
-
-                            int baseIndex = 0;
-                            for (int y = 0; y < scaledH; y++) {
-                                for (int x = 0; x < scaledW; x++) {
-                                    baseX[baseIndex] = centerImageX + x;
-                                    baseY[baseIndex] = centerImageY + y;
-                                    baseColors[baseIndex] = scaledImage.getRGB(x, y);
-                                    baseIndex++;
-                                }
-                            }
-
-                            for (int i = 0; i < N; i++) {
-                                int sourceIndex = i % particlesToUseBase;
-                                positionsX[i] = baseX[sourceIndex];
-                                positionsY[i] = baseY[sourceIndex];
-                                // startX[i] = baseX[sourceIndex];
-                                // startY[i] = baseY[sourceIndex];
-                                velocitiesX[i] = 0;
-                                velocitiesY[i] = 0;
-                                colors[i] = baseColors[sourceIndex];
-                            }
-
-                        } catch (Exception e) {
-                            JOptionPane.showMessageDialog(
-                                    null,
-                                    "Error reading file: " + e.getMessage(),
-                                    "Loading Error",
-                                    JOptionPane.ERROR_MESSAGE);
-                            e.printStackTrace();
+                    int baseIndex = 0;
+                    for (int y = 0; y < scaledH; y++) {
+                        for (int x = 0; x < scaledW; x++) {
+                            positionsX[baseIndex] = centerImageX + x + 0.5f;
+                            positionsY[baseIndex] = centerImageY + y + 0.5f;
+                            velocitiesX[baseIndex] = 0;
+                            velocitiesY[baseIndex] = 0;
+                            colors[baseIndex] = scaledImage.getRGB(x, y);
+                            baseIndex++;
                         }
                     }
+
+                    for (int i = baseIndex; i < N; i++) {
+                        int idx = i % pixelCount;
+                        positionsX[i] = positionsX[idx];
+                        positionsY[i] = positionsY[idx];
+                        // startX[i] = baseX[sourceIndex];
+                        // startY[i] = baseY[sourceIndex];
+                        velocitiesX[i] = 0;
+                        velocitiesY[i] = 0;
+                        colors[i] = colors[idx];
+                    }
+
+                } catch (Exception e) {
+                    JOptionPane.showMessageDialog(
+                            null,
+                            "Error reading file: " + e.getMessage(),
+                            "Loading Error",
+                            JOptionPane.ERROR_MESSAGE);
+                    e.printStackTrace();
                 }
             }
         });
@@ -660,7 +648,7 @@ class ParticlePanel extends JPanel
 
 class ParticleUpdateTask implements Runnable {
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
-    private static final VectorSpecies<Integer> I_SPECIES = VectorSpecies.of(int.class, F_SPECIES.vectorShape());
+    private static final VectorSpecies<Integer> I_SPECIES = IntVector.SPECIES_PREFERRED;
 
     private static final int LANE_SIZE = F_SPECIES.length();
 
@@ -669,16 +657,23 @@ class ParticleUpdateTask implements Runnable {
     private ParticlePanel panel;
     private float deltaTime;
     private int id;
+    private int panDx;
+    private int panDy;
+    private float vScale;
 
     public ParticleUpdateTask() {
     }
 
-    public void updateParams(int id, int start, int end, ParticlePanel panel, float deltaTime) {
+    public void updateParams(int id, int start, int end, ParticlePanel panel, float deltaTime, int panX, int panY,
+            float vScale) {
         this.startIndex = start;
         this.endIndex = end;
         this.panel = panel;
         this.deltaTime = deltaTime;
         this.id = id;
+        this.panDx = panX;
+        this.panDy = panY;
+        this.vScale = vScale;
     }
 
     @Override
@@ -694,13 +689,15 @@ class ParticleUpdateTask implements Runnable {
         // Constants derived from ParticlePanel state
         final FloatVector MOUSE_X_VEC = FloatVector.broadcast(F_SPECIES, (float) panel.mousePosition.x);
         final FloatVector MOUSE_Y_VEC = FloatVector.broadcast(F_SPECIES, (float) panel.mousePosition.y);
-        float minPullDist = panel.MIN_PULL_DIST;
+        final float minPullDist = panel.MIN_PULL_DIST;
         final float gf = panel.PULL_FORCE * deltaTime;
         final float frictionScalar = (float) Math.pow(panel.FRICTION, deltaTime);
         final FloatVector FRICTION_DT_VEC = FloatVector.broadcast(F_SPECIES, frictionScalar);
         final boolean mouseIsPressed = panel.isMousePressed;
 
         final int vectorEndIndex = startIndex + ((endIndex - startIndex) / LANE_SIZE) * LANE_SIZE;
+        final float ox = this.panDx;
+        final float oy = this.panDy;
 
         for (int i = startIndex; i < vectorEndIndex; i += LANE_SIZE) {
             FloatVector px = FloatVector.fromArray(F_SPECIES, positionsX, i);
@@ -723,8 +720,8 @@ class ParticleUpdateTask implements Runnable {
                 }
             }
 
-            px = px.add(vx.mul(deltaTime));
-            py = py.add(vy.mul(deltaTime));
+            px = px.add(vx.mul(deltaTime)).add(ox);
+            py = py.add(vy.mul(deltaTime)).add(oy);
             vx = vx.mul(FRICTION_DT_VEC);
             vy = vy.mul(FRICTION_DT_VEC);
 
@@ -754,15 +751,23 @@ class ParticleUpdateTask implements Runnable {
                 }
             }
 
+            px += vx * deltaTime + ox;
+            py += vy * deltaTime + oy;
             vx *= frictionScalar;
             vy *= frictionScalar;
-            px += vx * deltaTime;
-            py += vy * deltaTime;
 
             positionsX[i] = px;
             positionsY[i] = py;
             velocitiesX[i] = vx;
             velocitiesY[i] = vy;
+        }
+
+        if (this.vScale != 0) {
+            final float vs = vScale;
+            for (int i = startIndex; i < endIndex; i++) {
+                velocitiesX[i] *= vs;
+                velocitiesY[i] *= vs;
+            }
         }
 
         var pixels = panel.threadPixelBuffers[id];
