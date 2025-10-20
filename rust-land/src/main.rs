@@ -10,7 +10,7 @@ use thread_pool::ThreadPool;
 
 const WIDTH: usize = 1200;
 const HEIGHT: usize = 800;
-const PARTICLE_COUNT: usize = 50_000_000;
+const PARTICLE_COUNT: usize = 20_000_000;
 const THREAD_COUNT: usize = 8;
 const PARTICLE_STRIDE: usize = 2;
 const GRAVITY_STRENGTH: f32 = 200.5 * 7.0;

@@ -17,6 +17,7 @@ import java.util.concurrent.Future;
 import java.util.stream.IntStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Map;
 
@@ -61,13 +62,13 @@ class ParticlePanel extends JPanel
     public final float MIN_PULL_DIST = 1.0f;
     public final float FRICTION = 0.9f;
 
-    public static final int NUM_PARTICLES = 50_000_000;
+    public static final int NUM_PARTICLES = 200_000_000;
     private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
     private final ExecutorService executorService = Executors.newFixedThreadPool(CPU_COUNT);
     private final ParticleUpdateTask[] tasks = new ParticleUpdateTask[CPU_COUNT];
-    private final Set<Character> keysPressed = new HashSet<>();
+    private final Set<Character> keysPressed = Collections.synchronizedSet(new HashSet<>());
     private Map<Character, Point> velInputMap = Map.of(
             'a', new Point(1, 0),
             'd', new Point(-1, 0),
@@ -95,7 +96,7 @@ class ParticlePanel extends JPanel
     private volatile boolean running = false;
     private Thread gameLoopThread;
     private static final long NS_PER_SECOND = 1_000_000_000L;
-    private static final double TARGET_FPS = 120.0;
+    private static final double TARGET_FPS = 30.0;
     private static final double NS_PER_TICK = NS_PER_SECOND / TARGET_FPS;
     private boolean isResizeRequested = false;
     private boolean isResetRequested = false;
@@ -107,7 +108,7 @@ class ParticlePanel extends JPanel
     private int resetType = 0;
     private boolean isPanning = false;
     public volatile Point panDeltaInput = new Point(0, 0);
-    public volatile float inputVelScale = 0.2f;
+    public float inputVelScale = 0.2f;
     private boolean shouldReturnToStart = false;
 
     private long lastTickTime;
@@ -137,17 +138,6 @@ class ParticlePanel extends JPanel
 
         lastTickTime = System.nanoTime();
         frames = 0;
-    }
-
-    private long xorshiftState = 1;
-
-    private float fastRandomFloat() {
-        final float INT_TO_UNIT = 1.0f / 4294967296.0f;
-        xorshiftState ^= (xorshiftState << 13);
-        xorshiftState ^= (xorshiftState >>> 17);
-        xorshiftState ^= (xorshiftState << 5);
-
-        return (xorshiftState & 0xFFFFFFFFL) * INT_TO_UNIT;
     }
 
     public void startSimulation() {
@@ -215,9 +205,6 @@ class ParticlePanel extends JPanel
     }
 
     private void tick(float deltaTime) {
-        final int w = this.width;
-        final int h = this.height;
-
         final int vectorizedEndIndex = (NUM_PARTICLES / LANE_SIZE) * LANE_SIZE;
         final int chunkSize = vectorizedEndIndex / CPU_COUNT;
         final var futures = new ArrayList<Future<?>>(CPU_COUNT);
@@ -643,6 +630,17 @@ class ParticlePanel extends JPanel
 
             colors[i] = calculateOklabColor(L_CONSTANT, finalA, finalB);
         }
+    }
+
+    private long xorshiftState = 1;
+
+    private float fastRandomFloat() {
+        final float INT_TO_UNIT = 1.0f / 4294967296.0f;
+        xorshiftState ^= (xorshiftState << 13);
+        xorshiftState ^= (xorshiftState >>> 17);
+        xorshiftState ^= (xorshiftState << 5);
+
+        return (xorshiftState & 0xFFFFFFFFL) * INT_TO_UNIT;
     }
 }
 
