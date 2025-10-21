@@ -8,6 +8,7 @@ import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferByte;
 import java.awt.image.DataBufferInt;
 import java.io.File;
+import java.nio.FloatBuffer;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
@@ -62,7 +63,7 @@ class ParticlePanel extends JPanel
     public final float MIN_PULL_DIST = 1.0f;
     public final float FRICTION = 0.9f;
 
-    public static final int NUM_PARTICLES = 200_000_000;
+    public static final int NUM_PARTICLES = 20_000_000;
     private static final int CPU_COUNT = Runtime.getRuntime().availableProcessors();
     private static final VectorSpecies<Float> F_SPECIES = FloatVector.SPECIES_PREFERRED;
     private static final int LANE_SIZE = F_SPECIES.length();
