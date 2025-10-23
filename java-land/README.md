@@ -16,3 +16,15 @@ Building requires enabling the incubator vector api like so.
 ```sh
 javac --release 25 ParticleSim.java &&  java --add-modules jdk.incubator.vector --enable-preview ParticleSim  
 ```
+
+You can build a jar that can be run using one of the launchers in the build folder like so.
+
+```sh
+jar --create --file ParticleSim.jar --main-class ParticleSim ParticleSim.class
+```
+
+And then run it just like the file making sure to pass in the right args. 
+
+```sh
+java --add-modules jdk.incubator.vector --enable-preview -jar ParticleSim.jar
+```
