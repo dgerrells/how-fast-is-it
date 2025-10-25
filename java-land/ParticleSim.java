@@ -1,3 +1,8 @@
+//JAVA 25+
+//PREVIEW
+//COMPILE_OPTIONS --add-modules jdk.incubator.vector
+//RUNTIME_OPTIONS --add-modules jdk.incubator.vector
+
 import javax.imageio.ImageIO;
 import javax.swing.*;
 import javax.swing.filechooser.FileNameExtensionFilter;
