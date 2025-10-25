@@ -20,7 +20,7 @@ javac --release 25 ParticleSim.java &&  java --add-modules jdk.incubator.vector 
 You can build a jar that can be run using one of the launchers in the build folder like so.
 
 ```sh
-jar --create --file ParticleSim.jar --main-class ParticleSim ParticleSim.class
+jar --create --file ParticleSim.jar --main-class ParticleSim *.class
 ```
 
 And then run it just like the file making sure to pass in the right args. 
